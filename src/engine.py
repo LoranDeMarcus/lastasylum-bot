@@ -22,6 +22,7 @@ class BotEngine:
         self.sleep = sleep
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы (по позиции) — не долбимся в них
+        self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
 
     def start(self):
         if self.cfg.dry_run:
@@ -56,13 +57,21 @@ class BotEngine:
     def one_iteration(self):
         img = self.driver.screenshot()
 
-        # GUARD: действуем только на чистой отзум-карте. На зум-ине/в меню
-        # детекция ловит UI-кнопки как цели -> тыкает меню. Сам отзумить не
-        # можем (нет щипка) -> ждём человека.
+        # GUARD: действуем только на чистой отзум-карте. После отправки камера
+        # зумит за армией; на зум-ине детекция ловит UI-кнопки как цели.
+        # Пробуем авто-отзум щипком; если не помогло N раз (вероятно меню) —
+        # ждём человека.
         if not self.vision.on_world_map(img):
-            self.log("Не на карте мира (зум-ин/меню?) — жду. Отзумь/вернись на карту мира.")
-            self.sleep(2.0)
+            if self._offmap_pinches < self.cfg.max_pinch_recover:
+                self._offmap_pinches += 1
+                self.log(f"Не на карте — авто-отзум щипком ({self._offmap_pinches}/{self.cfg.max_pinch_recover}).")
+                self.driver.zoom_out()
+                self.sleep(1.5)
+            else:
+                self.log("Не на карте и щипок не помог (меню?) — жду человека.")
+                self.sleep(2.0)
             return None
+        self._offmap_pinches = 0     # снова на карте -> сброс счётчика
 
         squad = self.vision.squad_state(img)
         state = self.read_state(img)

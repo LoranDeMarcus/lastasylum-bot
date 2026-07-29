@@ -22,12 +22,15 @@ class FakeActions:
 class FakeDriver:
     def __init__(self, boom=False):
         self._boom = boom
+        self.zoom_outs = 0
     def screenshot(self):
         if self._boom:
             raise RuntimeError("kaboom")
         return "IMG"
     def swipe(self, *a, **k):
         pass
+    def zoom_out(self):
+        self.zoom_outs += 1
 
 class FakeVision:
     def __init__(self, energy=130, targets=None, squad='idle', on_map=True):
@@ -69,13 +72,23 @@ def test_iteration_boss_priority():
     assert a.type == 'assault_boss'
     assert ('assault', boss) in act.calls
 
-def test_guard_blocks_action_when_not_on_world_map():
+def test_guard_pinches_and_blocks_when_not_on_world_map():
     act = FakeActions()
     boss = Target('boss', 0, 450, 800)          # был бы assault, но мы не на карте
-    eng = _mk_engine(act, targets=[boss], on_map=False)
+    drv = FakeDriver()
+    eng = _mk_engine(act, targets=[boss], on_map=False, driver=drv)
     a = eng.one_iteration()
-    assert a is None                            # guard -> ничего не делаем
-    assert act.calls == []                      # ни одного тапа/действия
+    assert a is None                            # guard -> действия нет
+    assert act.calls == []                      # ни одного тапа-действия
+    assert drv.zoom_outs == 1                   # но пробуем авто-отзум щипком
+
+def test_guard_stops_pinching_after_limit():
+    act = FakeActions()
+    drv = FakeDriver()
+    eng = _mk_engine(act, targets=[], on_map=False, driver=drv)
+    for _ in range(10):
+        eng.one_iteration()
+    assert drv.zoom_outs == eng.cfg.max_pinch_recover   # не долбим щипком бесконечно
 
 def test_squad_busy_marching_waits():
     act = FakeActions()
