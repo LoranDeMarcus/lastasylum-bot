@@ -68,3 +68,9 @@ def test_panel_action_none_on_blank():
     v = Vision(cfg, FixedReader(5))
     blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)  # нет панели
     assert v.panel_action(blank) is None
+
+def test_on_world_map_false_on_blank():
+    cfg = Config()
+    v = Vision(cfg, FixedReader(5))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)  # нет легенды карты
+    assert v.on_world_map(blank) is False

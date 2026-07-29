@@ -67,6 +67,19 @@ class Vision:
             return 'attack'
         return None
 
+    def on_world_map(self, img):
+        """True только если это чистая отзум-карта мира: матчим легенду
+        «Моя территория/…» в top-right (её нет на зум-ине/в меню/полном UI).
+        Guard: движок действует лишь когда True (иначе тычет UI-кнопки как
+        цели — золотой «Альянс» ловится как босс и т.п.)."""
+        x, y, w, h = self.cfg.worldmap_legend_region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl("worldmap_legend")
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return False
+        score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+        return score >= self.cfg.worldmap_threshold
+
     def win_prediction(self, img):
         """Прогноз боя из превью отправки: 'win' («Лёгкая победа») |
         'lose' («Без шансов на победу») | None (не распознан). Ищем шаблоны

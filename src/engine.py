@@ -55,6 +55,15 @@ class BotEngine:
 
     def one_iteration(self):
         img = self.driver.screenshot()
+
+        # GUARD: действуем только на чистой отзум-карте. На зум-ине/в меню
+        # детекция ловит UI-кнопки как цели -> тыкает меню. Сам отзумить не
+        # можем (нет щипка) -> ждём человека.
+        if not self.vision.on_world_map(img):
+            self.log("Не на карте мира (зум-ин/меню?) — жду. Отзумь/вернись на карту мира.")
+            self.sleep(2.0)
+            return None
+
         squad = self.vision.squad_state(img)
         state = self.read_state(img)
 

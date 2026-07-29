@@ -30,10 +30,13 @@ class FakeDriver:
         pass
 
 class FakeVision:
-    def __init__(self, energy=130, targets=None, squad='idle'):
+    def __init__(self, energy=130, targets=None, squad='idle', on_map=True):
         self._energy = energy
         self._targets = targets if targets is not None else []
         self._squad = squad
+        self._on_map = on_map
+    def on_world_map(self, img):
+        return self._on_map
     def read_energy(self, img):
         return self._energy
     def find_targets(self, img):
@@ -42,10 +45,10 @@ class FakeVision:
         return self._squad
 
 def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
-               dry_run=False, driver=None):
+               dry_run=False, driver=None, on_map=True):
     cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run)
     eng = BotEngine(driver=driver or FakeDriver(),
-                    vision=FakeVision(energy, targets, squad),
+                    vision=FakeVision(energy, targets, squad, on_map),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
     eng.flasks = flasks
     return eng
@@ -65,6 +68,14 @@ def test_iteration_boss_priority():
     a = eng.one_iteration()
     assert a.type == 'assault_boss'
     assert ('assault', boss) in act.calls
+
+def test_guard_blocks_action_when_not_on_world_map():
+    act = FakeActions()
+    boss = Target('boss', 0, 450, 800)          # был бы assault, но мы не на карте
+    eng = _mk_engine(act, targets=[boss], on_map=False)
+    a = eng.one_iteration()
+    assert a is None                            # guard -> ничего не делаем
+    assert act.calls == []                      # ни одного тапа/действия
 
 def test_squad_busy_marching_waits():
     act = FakeActions()
