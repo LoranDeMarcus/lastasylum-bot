@@ -1,7 +1,7 @@
 # tests/test_engine.py
 import threading
 from config import Config
-from src.models import GameState, Target, Action
+from src.models import GameState, Target
 from src.engine import BotEngine
 
 class FakeActions:
@@ -75,3 +75,68 @@ def test_run_stops_on_event():
     eng = _mk_engine([GameState(300, 130, 0, [], 900, 1600)], act)
     reason = eng.run(ev)
     assert reason == 'stopped_by_user'
+
+
+class FakeDriver:
+    def screenshot(self):
+        return "IMG"
+
+
+class FakeVision:
+    """Возвращает заранее заданные значения, не читает реальные изображения."""
+    def __init__(self, energy=42, deployed=1, targets=None):
+        self._energy = energy
+        self._deployed = deployed
+        self._targets = targets if targets is not None else []
+    def read_energy(self, img):
+        return self._energy
+    def read_deployed(self, img):
+        return self._deployed
+    def find_targets(self, img):
+        return self._targets
+
+
+def test_read_state_builds_gamestate_from_vision():
+    cfg = Config(screen_w=900, screen_h=1600)
+    mob = Target('mob', 5, 460, 810)
+    driver = FakeDriver()
+    vision = FakeVision(energy=42, deployed=1, targets=[mob])
+    eng = BotEngine(driver=driver, vision=vision, actions=FakeActions(), cfg=cfg,
+                    log=lambda m: None, sleep=lambda s: None)
+    eng.flasks = 250
+
+    state = eng.read_state()
+
+    assert state.flasks == 250
+    assert state.energy == 42
+    assert state.deployed == 1
+    assert state.targets == [mob]
+    assert state.screen_w == 900
+    assert state.screen_h == 1600
+
+
+def test_read_state_handles_none():
+    cfg = Config(screen_w=900, screen_h=1600)
+    driver = FakeDriver()
+    vision = FakeVision(energy=None, deployed=None, targets=[])
+    eng = BotEngine(driver=driver, vision=vision, actions=FakeActions(), cfg=cfg,
+                    log=lambda m: None, sleep=lambda s: None)
+    eng.flasks = None
+
+    state = eng.read_state()
+
+    assert state.energy == 0
+    assert state.deployed == 0
+    assert state.flasks == 10**9
+
+
+def test_start_reads_flask_count():
+    cfg = Config(screen_w=900, screen_h=1600)
+    act = FakeActions()
+    act._flasks = 200
+    eng = BotEngine(driver=None, vision=None, actions=act, cfg=cfg,
+                    log=lambda m: None, sleep=lambda s: None)
+
+    eng.start()
+
+    assert eng.flasks == 200
