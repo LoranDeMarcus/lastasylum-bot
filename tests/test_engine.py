@@ -140,3 +140,31 @@ def test_start_reads_flask_count():
     eng.start()
 
     assert eng.flasks == 200
+
+
+def test_run_returns_error_on_iteration_exception():
+    act = FakeActions()
+    logs = []
+    cfg = Config(screen_w=900, screen_h=1600)
+    eng = BotEngine(driver=None, vision=None, actions=act, cfg=cfg,
+                    log=logs.append, sleep=lambda s: None)
+    eng.flasks = 300
+    def boom():
+        raise RuntimeError("kaboom")
+    eng.read_state = boom
+    reason = eng.run(threading.Event())
+    assert reason == 'error'
+    assert any('kaboom' in m for m in logs)
+
+
+def test_run_returns_error_on_start_exception():
+    class BoomActions(FakeActions):
+        def flasks_left(self):
+            raise NotImplementedError("no OCR")
+    logs = []
+    cfg = Config(screen_w=900, screen_h=1600)
+    eng = BotEngine(driver=None, vision=None, actions=BoomActions(), cfg=cfg,
+                    log=logs.append, sleep=lambda s: None)
+    reason = eng.run(threading.Event())
+    assert reason == 'error'
+    assert any('no OCR' in m for m in logs)

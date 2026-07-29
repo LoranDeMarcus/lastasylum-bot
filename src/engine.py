@@ -1,6 +1,7 @@
 # src/engine.py
 import os
 import time
+import traceback
 from src.models import GameState
 from src.decide import decide
 
@@ -52,15 +53,28 @@ class BotEngine:
                               self.cfg.screen_w // 2, self.cfg.screen_h // 3, 400)
         return action
 
+    def _log_error(self, where, exc):
+        self.log(f"[ОШИБКА в {where}] {type(exc).__name__}: {exc}")
+        self.log(traceback.format_exc())
+        self.log("Бот остановлен. Исправь причину и запусти снова.")
+
     def run(self, stop_event):
-        if self.flasks is None:
-            self.start()
+        try:
+            if self.flasks is None:
+                self.start()
+        except Exception as exc:
+            self._log_error("start", exc)
+            return 'error'
         while True:
             if stop_event.is_set():
                 return 'stopped_by_user'
             if os.path.exists(self.cfg.stop_file):
                 return 'stop_file'
-            action = self.one_iteration()
+            try:
+                action = self.one_iteration()
+            except Exception as exc:
+                self._log_error("one_iteration", exc)
+                return 'error'
             if action.type == 'stop':
                 return 'stop'
             self.sleep(0.5)
