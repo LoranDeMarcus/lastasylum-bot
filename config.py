@@ -22,7 +22,7 @@ class Config:
     screen_h: int = 1920
 
     # --- Регионы чтения чисел (x, y, w, h); плейсхолдеры до калибровки ---
-    region_energy: tuple = (0, 0, 0, 0)
+    region_energy: tuple = (48, 156, 74, 30)
     region_deployed: tuple = (0, 0, 0, 0)
     region_flasks: tuple = (0, 0, 0, 0)
 
