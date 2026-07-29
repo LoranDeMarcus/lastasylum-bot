@@ -13,6 +13,7 @@ class Config:
     boss_level_threshold: int = 50       # эвристика: level >= -> кандидат в боссы
     mob_squad: int = 2
     boss_squad: int = 1
+    squad_slots: dict = field(default_factory=lambda: {1: (0, 0), 2: (0, 0), 3: (0, 0), 4: (0, 0)})
     mob_energy_cost: int = 10
     boss_energy_cost: int = 20
 

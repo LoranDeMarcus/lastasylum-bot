@@ -62,3 +62,6 @@ class Vision:
 
     def read_flasks(self, img):
         return self.reader.read(img, self.cfg.region_flasks)
+
+    def squad_slot(self, n):
+        return self.cfg.squad_slots[n]
