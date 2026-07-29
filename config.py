@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 @dataclass
 class Config:
     # --- ADB ---
-    adb_path: str = "adb"
-    adb_serial: str = "127.0.0.1:5555"   # уточнить на калибровке (BlueStacks)
+    adb_path: str = r"C:\Program Files\BlueStacks_nxt\HD-Adb.exe"
+    adb_serial: str = "emulator-5554"    # BlueStacks_nxt (проверено: adb devices)
 
     # --- Пороги стратегии ---
     flask_stop_threshold: int = 180      # склянок < 180 -> STOP
@@ -17,9 +17,9 @@ class Config:
     mob_energy_cost: int = 10
     boss_energy_cost: int = 20
 
-    # --- Экран (заполняется на калибровке под ADB-разрешение) ---
-    screen_w: int = 900
-    screen_h: int = 1600
+    # --- Экран (ADB-разрешение BlueStacks, проверено screencap) ---
+    screen_w: int = 1080
+    screen_h: int = 1920
 
     # --- Регионы чтения чисел (x, y, w, h); плейсхолдеры до калибровки ---
     region_energy: tuple = (0, 0, 0, 0)
