@@ -13,7 +13,7 @@ class Config:
     boss_level_threshold: int = 50       # эвристика: level >= -> кандидат в боссы
     mob_squad: int = 2
     boss_squad: int = 1
-    squad_slots: dict = field(default_factory=lambda: {1: (0, 0), 2: (0, 0), 3: (0, 0), 4: (0, 0)})
+    squad_slots: dict = field(default_factory=lambda: {1: (200, 1630), 2: (425, 1630), 3: (650, 1630), 4: (875, 1630)})
     mob_energy_cost: int = 10
     boss_energy_cost: int = 20
 
@@ -22,9 +22,14 @@ class Config:
     screen_h: int = 1920
 
     # --- Регионы чтения чисел (x, y, w, h); плейсхолдеры до калибровки ---
-    region_energy: tuple = (48, 156, 74, 30)
-    region_deployed: tuple = (0, 0, 0, 0)
-    region_flasks: tuple = (0, 0, 0, 0)
+    region_energy: tuple = (48, 156, 74, 30)     # энергия на HUD карты (слева-вверху)
+    region_deployed: tuple = (0, 0, 0, 0)         # TODO: индикатора «Отряд X/4» на карте нет
+    region_flasks: tuple = (462, 1543, 105, 50)   # «В наличии: N» у фиолетовой склянки (окно энергии)
+
+    # --- Координаты окна энергии/отправки (фикс., окно с фикс. вёрсткой) ---
+    energy_open_xy: tuple = (962, 1802)   # «+» на экране отправки -> открыть окно энергии
+    flask_use_xy: tuple = (858, 1540)     # «Использовать» у фиолетовой склянки +50
+    energy_close_xy: tuple = (1000, 372)  # крестик закрытия окна энергии
 
     # --- HSV-маска целей (мобы «5» и боссы «70» — один жёлто-оранжевый тон) ---
     # красные черепа «28» (H≈8) в диапазон НЕ попадают -> сами отсеиваются

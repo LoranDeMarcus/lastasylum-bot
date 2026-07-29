@@ -1,4 +1,5 @@
 import os
+import glob
 from typing import Protocol, Optional
 import cv2
 import numpy as np
@@ -32,7 +33,7 @@ class TemplateReader:
     Эталоны берутся из `<templates_dir>/digits/<d>.png` (0-9). Устойчив к
     масштабу (нормализация высоты) и к цвету текста (авто-инверсия)."""
 
-    def __init__(self, cfg, norm_h: int = 28, min_match: float = 0.45):
+    def __init__(self, cfg, norm_h: int = 28, min_match: float = 0.33):
         self.cfg = cfg
         self.norm_h = norm_h
         self.min_match = min_match
@@ -53,20 +54,25 @@ class TemplateReader:
         return cv2.resize(g, (w, self.norm_h), interpolation=cv2.INTER_NEAREST)
 
     def _load_templates(self):
+        """Для каждой цифры грузим все варианты: `<d>.png` и `<d>_*.png`
+        (разные шрифты: жирный HUD, тонкий панельный). Матчинг — по лучшему
+        варианту. Эталоны сохранены как «белое-на-чёрном» (без авто-инверсии)."""
         d = os.path.join(self.cfg.templates_dir, "digits")
         tpl = {}
         for n in range(10):
-            path = os.path.join(d, f"{n}.png")
-            if not os.path.exists(path):
-                continue
-            im = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-            if im is None:
-                continue
-            # эталоны уже сохранены как «белое-на-чёрном» — без авто-инверсии
-            _, bt = cv2.threshold(im, 127, 255, cv2.THRESH_BINARY)
-            g = self._norm_glyph(bt)
-            if g is not None:
-                tpl[n] = g
+            variants = []
+            paths = glob.glob(os.path.join(d, f"{n}.png")) + \
+                    glob.glob(os.path.join(d, f"{n}_*.png"))
+            for path in sorted(paths):
+                im = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+                if im is None:
+                    continue
+                _, bt = cv2.threshold(im, 127, 255, cv2.THRESH_BINARY)
+                g = self._norm_glyph(bt)
+                if g is not None:
+                    variants.append(g)
+            if variants:
+                tpl[n] = variants
         return tpl
 
     def _match(self, glyph, tpl):
@@ -102,8 +108,8 @@ class TemplateReader:
             if g is None:
                 continue
             best_n, best = None, -1.0
-            for n, tpl in self._templates.items():
-                s = self._match(g, tpl)
+            for n, variants in self._templates.items():
+                s = max(self._match(g, v) for v in variants)
                 if s > best:
                     best, best_n = s, n
             if best_n is not None and best >= self.min_match:
