@@ -56,3 +56,15 @@ def test_find_targets_rejects_wide_shape():
     img = np.full((400, 400, 3), 128, dtype=np.uint8)
     cv2.ellipse(img, (200, 250), (40, 26), 0, 0, 360, ORANGE, -1)  # ~80x52, aspect≈1.54
     assert v.find_targets(img) == []
+
+def test_squad_state_idle_on_blank():
+    cfg = Config()
+    v = Vision(cfg, FixedReader(5))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)  # нет виджета «Отряд»
+    assert v.squad_state(blank) == 'idle'
+
+def test_panel_action_none_on_blank():
+    cfg = Config()
+    v = Vision(cfg, FixedReader(5))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)  # нет панели
+    assert v.panel_action(blank) is None

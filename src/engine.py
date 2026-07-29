@@ -6,6 +6,13 @@ from src.models import GameState
 from src.decide import decide
 
 class BotEngine:
+    """Цикл фарма. Один отряд-на-задачу за раз (v1 последовательный):
+    отряд занят -> ждём; свободен/«Возвращение» -> шлём следующую цель.
+    Приоритет: босс («Штурм», отр.1) -> моб («Атака», отр.2) -> explore.
+
+    dry_run (cfg.dry_run): читаем экран и ЛОГИРУЕМ решение, но НЕ тапаем —
+    для проверки детекции/логики на живой игре без действий."""
+
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep):
         self.driver = driver
         self.vision = vision
@@ -14,40 +21,78 @@ class BotEngine:
         self.log = log
         self.sleep = sleep
         self.flasks = None
+        self.skip_targets = set()   # непроходимые боссы (по позиции) — не долбимся в них
 
     def start(self):
-        self.flasks = self.actions.flasks_left()
-        self.log(f"Старт. Склянок: {self.flasks}")
+        if self.cfg.dry_run:
+            self.flasks = 10 ** 9        # в dry-run не открываем энергоокно
+            self.log("Старт (DRY-RUN: тапов не будет).")
+        else:
+            self.flasks = self.actions.flasks_left()
+            self.log(f"Старт. Склянок: {self.flasks}")
 
-    def read_state(self):
-        img = self.driver.screenshot()
+    def _squad_ready(self, state):
+        """Готов ли слать следующую цель по состоянию отряда."""
+        if state == 'idle':
+            return True
+        if state == 'returning' and self.cfg.send_next_on_return:
+            return True
+        return False
+
+    def read_state(self, img):
         energy = self.vision.read_energy(img)
-        deployed = self.vision.read_deployed(img)
         targets = self.vision.find_targets(img)
         return GameState(
             flasks=self.flasks if self.flasks is not None else 10**9,
-            energy=energy if energy is not None else 0,
-            deployed=deployed if deployed is not None else 0,
-            targets=targets, screen_w=self.cfg.screen_w, screen_h=self.cfg.screen_h,
+            energy=energy if energy is not None else 999,   # не прочли -> не рефиллим спекулятивно
+            deployed=0, targets=targets,
+            screen_w=self.cfg.screen_w, screen_h=self.cfg.screen_h,
         )
 
+    @staticmethod
+    def _target_key(t):
+        return (t.kind, round(t.x / 20), round(t.y / 20))
+
     def one_iteration(self):
-        state = self.read_state()
+        img = self.driver.screenshot()
+        squad = self.vision.squad_state(img)
+        state = self.read_state(img)
+
+        # отряд в походе и слать рано -> ждём
+        if not self._squad_ready(squad):
+            self.log(f"Отряд занят ({squad}), ждём.")
+            self.sleep(2.0)
+            return None
+
+        # исключаем непроходимых боссов, помеченных ранее
+        if self.skip_targets:
+            state.targets = [t for t in state.targets
+                             if self._target_key(t) not in self.skip_targets]
+
         action = decide(state, self.cfg)
+        n_mob = sum(1 for t in state.targets if t.kind == 'mob')
+        n_boss = sum(1 for t in state.targets if t.kind == 'boss')
+        self.log(f"[отряд={squad}] энергия={state.energy} склянок={self.flasks} "
+                 f"цели: мобов={n_mob} боссов={n_boss} -> {action.type}"
+                 + (f" @({action.target.x},{action.target.y})" if action.target else ""))
+
+        if self.cfg.dry_run:
+            self.sleep(1.0)
+            return action
+
         if action.type == 'stop':
             self.log("Стоп: склянок меньше порога.")
         elif action.type == 'refill':
             self.flasks = self.actions.refill_energy()
             self.log(f"Рефилл. Склянок осталось: {self.flasks}")
-        elif action.type == 'wait':
-            self.actions.close_popups()
-            self.sleep(2.0)
         elif action.type == 'assault_boss':
-            self.log(f"Штурм босса ур.{action.target.level}")
-            self.actions.assault_boss(action.target)
+            res = self.actions.assault_boss(action.target)
+            self.log(f"  Штурм босса -> {res}")
+            if res == 'skip_unwinnable':
+                self.skip_targets.add(self._target_key(action.target))
         elif action.type == 'attack_mob':
-            self.log(f"Атака моба ур.{action.target.level}")
-            self.actions.attack_mob(action.target)
+            res = self.actions.attack_mob(action.target)
+            self.log(f"  Атака моба -> {res}")
         elif action.type == 'explore':
             self.driver.swipe(self.cfg.screen_w // 2, self.cfg.screen_h * 2 // 3,
                               self.cfg.screen_w // 2, self.cfg.screen_h // 3, 400)
@@ -75,6 +120,6 @@ class BotEngine:
             except Exception as exc:
                 self._log_error("one_iteration", exc)
                 return 'error'
-            if action.type == 'stop':
+            if action is not None and action.type == 'stop' and not self.cfg.dry_run:
                 return 'stop'
             self.sleep(0.5)
