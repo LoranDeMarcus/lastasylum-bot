@@ -49,7 +49,7 @@ class Vision:
             return None
         res = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
         _, maxv, _, maxloc = cv2.minMaxLoc(res)
-        if maxv < 0.8:
+        if maxv < self.cfg.template_match_threshold:
             return None
         th, tw = tpl.shape[:2]
         return (maxloc[0] + tw // 2, maxloc[1] + th // 2)

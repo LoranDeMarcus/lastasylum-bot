@@ -35,5 +35,6 @@ class Config:
 
     # --- Фиксированные координаты кнопок (калибруются; -1 = искать шаблоном) ---
     templates_dir: str = "templates"
+    template_match_threshold: float = 0.8
     jitter_px: int = 4
     stop_file: str = "STOP"

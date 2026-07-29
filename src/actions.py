@@ -62,7 +62,7 @@ class Actions:
             self.driver.tap(*x)
 
     def flasks_left(self):
-        use_pos = self._open_energy()
+        self._open_energy()
         img = self.driver.screenshot()
         n = self.vision.read_flasks(img)
         self._close_energy()

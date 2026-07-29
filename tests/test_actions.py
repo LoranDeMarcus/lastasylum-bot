@@ -38,7 +38,7 @@ def test_attack_mob_sequence_selects_squad_2():
         "panel": {"attack": (400, 900)},
         "preview": {"dispatch": (450, 1400)},
     })
-    act = Actions(drv, vis, cfg)
+    act = Actions(drv, vis, cfg, sleep=lambda *_: None)
     ok = act.attack_mob(Target('mob', 5, 300, 300))
     assert ok is True
     # тапнули моба, кнопку атаки, слот отряда 2, кнопку отправки
@@ -55,7 +55,7 @@ def test_refill_returns_remaining_flasks():
         "map": {"energy_cross": (50, 950)},
         "energy": {"flask_use": (480, 900), "energy_close": (560, 240)},
     }, flasks=200)
-    act = Actions(drv, vis, cfg)
+    act = Actions(drv, vis, cfg, sleep=lambda *_: None)
     left = act.refill_energy()
     assert left == 200
     assert (480, 900) in drv.taps    # нажали «Использовать»

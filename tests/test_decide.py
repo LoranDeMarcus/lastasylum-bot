@@ -46,3 +46,17 @@ def test_explore_when_no_targets():
 def test_boss_ignores_level_filter():
     boss = Target('boss', 70, 450, 800)
     assert decide(_state(targets=[boss]), CFG).type == 'assault_boss'
+
+def test_flasks_exactly_180_not_stop():
+    # 180 не триггерит stop (условие < 180)
+    assert decide(_state(flasks=180), CFG).type != 'stop'
+
+def test_energy_exactly_20_not_refill():
+    # 20 не триггерит refill (условие < 20)
+    assert decide(_state(energy=20), CFG).type != 'refill'
+
+def test_nearest_of_multiple_bosses():
+    far = Target('boss', 70, 100, 100)
+    near = Target('boss', 70, 455, 805)   # ближе к центру (450,800)
+    a = decide(_state(targets=[far, near]), CFG)
+    assert a.type == 'assault_boss' and a.target is near
