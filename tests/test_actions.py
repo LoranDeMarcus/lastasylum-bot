@@ -124,5 +124,5 @@ def test_refill_returns_remaining_flasks():
     act = Actions(drv, vis, cfg, sleep=lambda *_: None)
     left = act.refill_energy()
     assert left == 200
-    assert cfg.energy_open_xy in drv.taps   # тап по «+»
-    assert (480, 900) in drv.taps           # «Использовать»
+    assert cfg.energy_open_xy in drv.taps    # тап по «+»
+    assert cfg.flask_use_xy in drv.taps      # фиксированная координата фиолетовой +50

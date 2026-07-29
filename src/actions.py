@@ -24,10 +24,7 @@ class Actions:
             self.sleep(poll_s)
         return None
 
-    def open_target_panel(self, target):
-        """Тап по цели и ожидание панели. Возвращает 'attack'|'assault'|None.
-        None -> промах (вероятно карта зумнулась), вид нужно восстановить."""
-        self.driver.tap(target.x, target.y)
+    def _poll_panel(self):
         deadline = max(1, int(self.cfg.panel_verify_timeout_s / 0.3))
         for _ in range(deadline):
             act = self.vision.panel_action(self.driver.screenshot())
@@ -35,6 +32,21 @@ class Actions:
                 return act
             self.sleep(0.3)
         return None
+
+    def open_target_panel(self, target):
+        """Тап по цели и ожидание панели ('attack'|'assault'|None).
+        Двухтапно: у мобов маленький хитбокс — первый тап часто ПРОМАХ и
+        карта зумит+центрирует цель; тогда второй тап по центру-спрайту
+        открывает панель (босс крупный — обычно открывается с первого).
+        None только если панель не открылась и после второго тапа."""
+        self.driver.tap(target.x, target.y)
+        act = self._poll_panel()
+        if act is not None:
+            return act
+        # промах -> цель отзумлена в центр; тап по центру-спрайту
+        self.driver.tap(self.cfg.screen_w // 2,
+                        self.cfg.screen_h // 2 + self.cfg.zoom_center_tap_offset_y)
+        return self._poll_panel()
 
     def _tap_action_button(self, name):
         """С открытой панели жмём кнопку действия («attack»/«assault»)."""
@@ -97,31 +109,30 @@ class Actions:
         self.driver.tap(*send)
         return "dispatched"
 
-    # --- Энергия/склянки (координаты энергоокна требуют живой калибровки) ---
+    # --- Энергия/склянки (окно «Восстановить энергию», откалибровано) ---
     def _open_energy(self):
-        self.driver.tap(*self.cfg.energy_open_xy)   # «+» на экране отправки
-        return self.wait_for("flask_use", timeout_s=3.0)
+        """«+» на превью -> окно энергии. True если окно открылось (видна
+        кнопка «Использовать»). Две кнопки «Использовать» идентичны, поэтому
+        тапаем не по матчу, а по фикс. координате нужной (фиолетовой) склянки."""
+        self.driver.tap(*self.cfg.energy_open_xy)
+        return self.wait_for("flask_use", timeout_s=3.0) is not None
 
     def _close_energy(self):
-        img = self.driver.screenshot()
-        x = self.vision.find_button(img, "energy_close")
-        if x is not None:
-            self.driver.tap(*x)
-        else:
-            self.driver.tap(*self.cfg.energy_close_xy)
+        x = self.vision.find_button(self.driver.screenshot(), "energy_close")
+        self.driver.tap(*(x if x is not None else self.cfg.energy_close_xy))
 
     def flasks_left(self):
-        if self._open_energy() is None:
+        if not self._open_energy():
             return -1
         n = self.vision.read_flasks(self.driver.screenshot())
         self._close_energy()
         return n if n is not None else -1
 
     def refill_energy(self):
-        use_pos = self._open_energy()
-        if use_pos is not None:
-            self.driver.tap(*use_pos)
-            self.sleep(0.4)
+        if not self._open_energy():
+            return -1
+        self.driver.tap(*self.cfg.flask_use_xy)     # фиолетовая +50 (фикс. координата)
+        self.sleep(0.4)
         n = self.vision.read_flasks(self.driver.screenshot())
         self._close_energy()
         return n if n is not None else -1
