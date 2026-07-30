@@ -7,6 +7,7 @@ class FakeDriver:
         self._frames = frames
         self.i = 0
         self.taps = []
+        self.backs = 0
     def screenshot(self):
         f = self._frames[min(self.i, len(self._frames) - 1)]
         self.i += 1
@@ -15,6 +16,8 @@ class FakeDriver:
         self.taps.append((x, y))
     def swipe(self, *a, **k):
         pass
+    def back(self):
+        self.backs += 1
 
 class FakeVision:
     """Кнопки {frame:{name:(x,y)}}; панель {frame:'attack'|'assault'};
@@ -109,6 +112,54 @@ def test_assault_boss_skips_when_unwinnable():
     assert cfg.preview_close_xy in drv.taps               # закрыли превью
     assert vis.squad_slot(cfg.boss_squad) not in drv.taps # отряд НЕ выбирали
     assert (535, 1340) not in drv.taps                    # штурм НЕ начинали
+
+def test_search_thief_presses_back_when_no_panel():
+    """Событие не открылось/вора нет -> диалог мог остаться на экране.
+    Закрываем BACK'ом, иначе следующая итерация тапает вслепую по меню."""
+    cfg = Config()
+    drv = FakeDriver(["dialog"])
+    vis = FakeVision(buttons_by_frame={}, panel_by_frame={})
+    act = Actions(drv, vis, cfg, log=lambda *_: None, sleep=lambda *_: None)
+    assert act.search_thief() is None
+    assert drv.backs == 1
+
+def _search_frames_and_vision(flasks=251):
+    frames = ["panel", "panel2", "preview", "energy", "energy2", "energy3", "preview2"]
+    vis = FakeVision(
+        buttons_by_frame={
+            "panel2": {"attack": (400, 900)},
+            "preview": {"dispatch": (450, 1400)},
+            "preview2": {"dispatch": (450, 1400)},
+            "energy": {"flask_use": (480, 900)},
+            "energy3": {"energy_close": (560, 240)},
+        },
+        panel_by_frame={"panel": "attack"},
+        flasks=flasks,
+    )
+    return FakeDriver(frames), vis
+
+def test_search_and_attack_reads_flasks_from_preview_without_using_one():
+    """Окно энергии доступно ТОЛЬКО с превью -> читаем склянки пиггибеком,
+    склянку при этом НЕ тратим."""
+    cfg = Config()
+    drv, vis = _search_frames_and_vision(flasks=251)
+    act = Actions(drv, vis, cfg, log=lambda *_: None, sleep=lambda *_: None)
+    res = act.search_and_attack_mob(want_flasks=True)
+    assert res == "dispatched"
+    assert act.last_flasks == 251
+    assert cfg.energy_open_xy in drv.taps
+    assert cfg.flask_use_xy not in drv.taps
+    assert (450, 1400) in drv.taps            # «Отправиться» всё равно нажали
+
+def test_search_and_attack_uses_flask_when_refill_requested():
+    cfg = Config()
+    drv, vis = _search_frames_and_vision(flasks=200)
+    act = Actions(drv, vis, cfg, log=lambda *_: None, sleep=lambda *_: None)
+    res = act.search_and_attack_mob(refill=True)
+    assert res == "dispatched"
+    assert cfg.flask_use_xy in drv.taps       # фиолетовая +50 применена
+    assert act.last_flasks == 200             # остаток прочитан после применения
+    assert (450, 1400) in drv.taps
 
 def test_refill_returns_remaining_flasks():
     cfg = Config()

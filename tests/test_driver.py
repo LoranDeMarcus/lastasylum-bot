@@ -1,5 +1,14 @@
 import random
-from src.driver import jitter
+from config import Config
+from src.driver import jitter, AdbDriver
+
+def test_back_sends_keyevent_back():
+    """BACK закрывает случайно открытый диалог -> вид снова чистый."""
+    drv = AdbDriver(Config())
+    calls = []
+    drv._adb = lambda *a, **k: calls.append(a)
+    drv.back()
+    assert calls == [("shell", "input", "keyevent", "4")]
 
 def test_jitter_within_bounds():
     rng = random.Random(42)

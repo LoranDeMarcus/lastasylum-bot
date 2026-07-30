@@ -38,6 +38,11 @@ class AdbDriver:
         jx, jy = jitter(int(x), int(y), self.cfg.jitter_px, self._rng)
         self._adb("shell", "input", "tap", str(jx), str(jy))
 
+    def back(self):
+        """Системная «назад» — закрывает случайно открытый диалог/меню.
+        Дешёвое восстановление вида, когда флоу не дошёл до панели цели."""
+        self._adb("shell", "input", "keyevent", "4")
+
     def swipe(self, x1, y1, x2, y2, dur_ms=300):
         self._adb("shell", "input", "swipe",
                   str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(dur_ms))

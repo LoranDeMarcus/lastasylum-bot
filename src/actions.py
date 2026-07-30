@@ -15,6 +15,7 @@ class Actions:
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
+        self.last_flasks = None   # последнее прочитанное «В наличии: N» (движок берёт отсюда)
 
     def wait_for(self, name, timeout_s=8.0, poll_s=0.4):
         for _ in range(max(1, int(timeout_s / poll_s))):
@@ -65,6 +66,22 @@ class Actions:
         """Закрыть превью/панель без отправки (тап по затемнённой области)."""
         self.driver.tap(*self.cfg.preview_close_xy)
 
+    def _dispatch_mob_from_panel(self, refill=False, want_flasks=False):
+        """С ОТКРЫТОЙ панели моба: «Атака» -> (опц. окно энергии) -> отряд 2
+        -> «Отправиться». Окно энергии доступно ТОЛЬКО с превью, поэтому
+        чтение склянок/рефилл делаем здесь, пиггибеком (см. _energy_side_trip)."""
+        if not self._tap_action_button("attack"):
+            return "failed"
+        send = self.wait_for("dispatch")          # кнопка «Отправиться»
+        if send is None:
+            return "failed"
+        if refill or want_flasks:
+            self.last_flasks = self._energy_side_trip(use_flask=refill)
+        self._select_squad(self.cfg.mob_squad)    # отряд 2
+        send = self.wait_for("dispatch", timeout_s=3.0) or send
+        self.driver.tap(*send)
+        return "dispatched"
+
     def attack_mob(self, target):
         act = self.open_target_panel(target)
         if act is None:
@@ -74,15 +91,37 @@ class Actions:
             self.log(f"  ожидал панель моба, открылась '{act}' -> отмена")
             self.close_preview()
             return "wrong_panel"
-        if not self._tap_action_button("attack"):
-            return "failed"
-        send = self.wait_for("dispatch")          # кнопка «Отправиться»
-        if send is None:
-            return "failed"
-        self._select_squad(self.cfg.mob_squad)    # отряд 2
-        send = self.wait_for("dispatch", timeout_s=3.0) or send
-        self.driver.tap(*send)
-        return "dispatched"
+        return self._dispatch_mob_from_panel()
+
+    def search_thief(self):
+        """«Особое событие» -> «Поиск вора» -> «Поиск» -> тап найденного моба
+        (центрируется у базы -> короткий марш). Возвращает 'attack' если
+        открылась панель моба, иначе None. Координаты — фикс. вёрстка диалога."""
+        self.driver.tap(*self.cfg.event_button_xy);      self.sleep(1.2)
+        self.driver.tap(*self.cfg.search_thief_tab_xy);  self.sleep(0.6)
+        self.driver.tap(*self.cfg.search_button_xy);     self.sleep(1.6)
+        self.driver.tap(*self.cfg.search_result_xy);     self.sleep(1.0)
+        act = self.vision.panel_action(self.driver.screenshot())
+        if act is None:
+            # диалог события мог остаться открытым (вора нет / вёрстка иная) —
+            # закрываем BACK'ом, иначе следующая итерация тапает по меню вслепую
+            self.driver.back()
+            self.sleep(0.6)
+        return act
+
+    def search_and_attack_mob(self, refill=False, want_flasks=False):
+        """Найти вора у базы и отправить отряд 2. Статусы как у attack_mob.
+        refill — применить фиолетовую склянку в превью; want_flasks — просто
+        прочитать остаток склянок там же (окно энергии только с превью)."""
+        act = self.search_thief()
+        if act is None:
+            self.log("  «Поиск» не дал панели моба")
+            return "no_thief"
+        if act != "attack":
+            self.log(f"  «Поиск» открыл '{act}' вместо моба -> отмена")
+            self.close_preview()
+            return "wrong_panel"
+        return self._dispatch_mob_from_panel(refill=refill, want_flasks=want_flasks)
 
     def assault_boss(self, target):
         act = self.open_target_panel(target)
@@ -121,18 +160,26 @@ class Actions:
         x = self.vision.find_button(self.driver.screenshot(), "energy_close")
         self.driver.tap(*(x if x is not None else self.cfg.energy_close_xy))
 
-    def flasks_left(self):
+    def _energy_side_trip(self, use_flask):
+        """С ОТКРЫТОГО превью отправки: «+» -> окно энергии -> (опц.)
+        «Использовать» фиолетовую +50 -> прочитать «В наличии: N» -> закрыть.
+        None, если окно не открылось. ВАЖНО: с карты «+» тапнет кнопку дома,
+        поэтому вызывать только когда превью на экране."""
         if not self._open_energy():
-            return -1
+            self.log("  окно энергии не открылось (не превью?)")
+            return None
+        if use_flask:
+            self.driver.tap(*self.cfg.flask_use_xy)   # фиолетовая +50 (фикс. координата)
+            self.sleep(0.4)
         n = self.vision.read_flasks(self.driver.screenshot())
         self._close_energy()
+        self.last_flasks = n
+        return n
+
+    def flasks_left(self):
+        n = self._energy_side_trip(use_flask=False)
         return n if n is not None else -1
 
     def refill_energy(self):
-        if not self._open_energy():
-            return -1
-        self.driver.tap(*self.cfg.flask_use_xy)     # фиолетовая +50 (фикс. координата)
-        self.sleep(0.4)
-        n = self.vision.read_flasks(self.driver.screenshot())
-        self._close_energy()
+        n = self._energy_side_trip(use_flask=True)
         return n if n is not None else -1
