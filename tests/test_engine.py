@@ -5,11 +5,13 @@ from src.models import GameState, Target
 from src.engine import BotEngine
 
 class FakeActions:
-    def __init__(self, search_result="dispatched"):
+    def __init__(self, search_result="dispatched", attack_result="dispatched"):
         self.calls = []
         self._flasks = 300
         self._search_result = search_result
+        self._attack_result = attack_result
         self.last_flasks = None
+        self.attack_kwargs = None
     def flasks_left(self):
         self.calls.append(('flasks_left',))
         return self._flasks
@@ -17,8 +19,12 @@ class FakeActions:
         self._flasks -= 1
         self.calls.append(('refill',))
         return self._flasks
-    def attack_mob(self, t):
-        self.calls.append(('attack', t)); return "dispatched"
+    def attack_mob(self, t, refill=False, want_flasks=False):
+        self.calls.append(('attack', t))
+        self.attack_kwargs = (refill, want_flasks)
+        if want_flasks or refill:
+            self.last_flasks = self._flasks
+        return self._attack_result
     def assault_boss(self, t):
         self.calls.append(('assault', t)); return "dispatched"
     def search_and_attack_mob(self, refill=False, want_flasks=False):
@@ -65,9 +71,10 @@ def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
     eng.flasks = flasks
     return eng
 
-def _mk_search_engine(actions, squad='idle', energy=130, flasks=300):
+def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=None):
     cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True)
-    eng = BotEngine(driver=FakeDriver(), vision=FakeVision(energy=energy, squad=squad),
+    eng = BotEngine(driver=FakeDriver(),
+                    vision=FakeVision(energy=energy, targets=targets, squad=squad),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
     eng.flasks = flasks
     return eng
@@ -132,6 +139,72 @@ def test_search_strategy_waits_when_marching():
     a = eng.one_iteration()
     assert a is None
     assert act.calls == []                   # отряд занят -> не ищем
+
+# --- Гибрид: фарм видимых соседей до нового «Поиска вора» ---
+
+def test_search_attacks_visible_neighbor_instead_of_searching():
+    act = FakeActions()
+    mob = Target('mob', 5, 460, 810)         # виден на текущем виде
+    eng = _mk_search_engine(act, targets=[mob])
+    eng.one_iteration()
+    assert ('attack', mob) in act.calls               # фармим соседа
+    assert not any(c[0] == 'search' for c in act.calls)   # без нового «Поиска»
+
+def test_search_falls_back_to_thief_when_no_neighbor_mobs():
+    act = FakeActions()
+    eng = _mk_search_engine(act, targets=[])          # соседей не видно
+    eng.one_iteration()
+    assert any(c[0] == 'search' for c in act.calls)
+    assert not any(c[0] == 'attack' for c in act.calls)
+
+def test_search_picks_neighbor_nearest_to_center():
+    act = FakeActions()
+    far = Target('mob', 5, 100, 200)
+    near = Target('mob', 5, 470, 780)        # центр экрана (450, 800)
+    eng = _mk_search_engine(act, targets=[far, near])
+    eng.one_iteration()
+    attacked = [c[1] for c in act.calls if c[0] == 'attack']
+    assert attacked == [near]                # ближайший к центру = короткий марш
+
+def test_search_ignores_boss_neighbor_and_searches():
+    act = FakeActions()
+    boss = Target('boss', 0, 460, 810)       # рогатый / ложный UI -> не моб
+    eng = _mk_search_engine(act, targets=[boss])
+    eng.one_iteration()
+    assert not any(c[0] == 'attack' for c in act.calls)   # босса соседом не фармим
+    assert any(c[0] == 'search' for c in act.calls)       # мобов нет -> поиск
+
+def test_search_reads_flasks_on_neighbor_dispatch():
+    act = FakeActions(); act._flasks = 240
+    mob = Target('mob', 5, 460, 810)
+    eng = _mk_search_engine(act, flasks=None, targets=[mob])
+    eng.one_iteration()
+    assert act.attack_kwargs == (False, True)   # refill=False, want_flasks=True
+    assert eng.flasks == 240
+
+def test_search_requests_refill_on_neighbor_when_energy_low():
+    act = FakeActions()
+    mob = Target('mob', 5, 460, 810)
+    eng = _mk_search_engine(act, energy=12, targets=[mob])   # < energy_refill_threshold
+    eng.one_iteration()
+    assert act.attack_kwargs == (True, False)
+
+def test_search_skips_phantom_neighbor_after_failed_attack():
+    act = FakeActions(attack_result="wrong_panel")
+    phantom = Target('mob', 5, 460, 810)
+    eng = _mk_search_engine(act, targets=[phantom])
+    eng.one_iteration()
+    assert eng._target_key(phantom) in eng.skip_targets   # не выбираем снова
+
+def test_search_stops_after_no_progress_across_neighbor_and_search():
+    """Промах по соседу (-> skip) и провал «Поиска» одинаково копят
+    «нет прогресса»; после порога — стоп и зов человека."""
+    act = FakeActions(search_result="no_thief", attack_result="missed")
+    mob = Target('mob', 5, 460, 810)
+    eng = _mk_search_engine(act, targets=[mob])
+    results = [eng.one_iteration() for _ in range(eng.cfg.max_search_failures)]
+    assert results[-1].type == 'stop'
+    assert all(r is None or r.type != 'stop' for r in results[:-1])
 
 def test_iteration_attacks_mob():
     act = FakeActions()

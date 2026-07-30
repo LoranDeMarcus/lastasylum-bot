@@ -82,7 +82,7 @@ class Actions:
         self.driver.tap(*send)
         return "dispatched"
 
-    def attack_mob(self, target):
+    def attack_mob(self, target, refill=False, want_flasks=False):
         act = self.open_target_panel(target)
         if act is None:
             self.log("  промах по мобу (панель не открылась -> вероятно зум)")
@@ -91,7 +91,7 @@ class Actions:
             self.log(f"  ожидал панель моба, открылась '{act}' -> отмена")
             self.close_preview()
             return "wrong_panel"
-        return self._dispatch_mob_from_panel()
+        return self._dispatch_mob_from_panel(refill=refill, want_flasks=want_flasks)
 
     def search_thief(self):
         """«Особое событие» -> «Поиск вора» -> «Поиск» -> тап найденного моба
