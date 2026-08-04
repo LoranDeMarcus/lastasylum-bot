@@ -22,7 +22,22 @@ class BotController:
     def stop(self):
         self._stop.set()
 
-def run_gui(controller, log_queue=None):
+def apply_flask_threshold(cfg, raw):
+    """Применить введённый в GUI нижний порог остатка склянок: ниже него бот
+    больше не тратит склянки на рефилл (и останавливается, когда энергии не
+    хватает). Мусорный/отрицательный ввод игнорируем — остаётся прежнее
+    значение, чтобы опечатка не отключила защиту. Возвращает действующее
+    значение (его же кладём обратно в поле)."""
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return cfg.flask_stop_threshold
+    if n < 0:
+        return cfg.flask_stop_threshold
+    cfg.flask_stop_threshold = n
+    return n
+
+def run_gui(controller, log_queue=None, cfg=None):
     import tkinter as tk
     root = tk.Tk()
     root.title("Last Asylum Bot")
@@ -45,6 +60,19 @@ def run_gui(controller, log_queue=None):
                 append(msg)
             root.after(200, poll)
         root.after(200, poll)
+
+    if cfg is not None:
+        row = tk.Frame(root); row.pack(pady=(0, 2))
+        tk.Label(row, text="Мин. остаток склянок:").pack(side="left", padx=(0, 6))
+        var = tk.StringVar(value=str(cfg.flask_stop_threshold))
+        tk.Entry(row, width=8, textvariable=var).pack(side="left")
+
+        def apply_threshold():
+            var.set(str(apply_flask_threshold(cfg, var.get())))
+            if log_queue is not None:
+                log_queue.put(f"Мин. остаток склянок: {cfg.flask_stop_threshold}")
+
+        tk.Button(row, text="Применить", command=apply_threshold).pack(side="left", padx=6)
 
     btns = tk.Frame(root); btns.pack(pady=6)
     tk.Button(btns, text="Start", width=12,

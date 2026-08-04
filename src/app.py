@@ -23,7 +23,7 @@ def main():
                          corruption=corruption)
 
     controller = BotController(make_engine)
-    run_gui(controller, log_q)
+    run_gui(controller, log_q, cfg)
 
 if __name__ == "__main__":
     main()
