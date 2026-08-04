@@ -47,7 +47,7 @@ class AdbDriver:
             x, y = self.human.point_in(box)
         else:
             x, y = jitter(box.x, box.y, self.cfg.jitter_px, self._rng)
-        if self.human is not None and self.cfg.human_tap_hold:
+        if self.human is not None and self.cfg.human_enabled and self.cfg.human_tap_hold:
             # input tap = down/up с нулевой длительностью. Нажатие переменной
             # длины делается swipe'ом в ту же точку. Флаг выключен по
             # умолчанию: это другой тип события, игра МОЖЕТ отработать его

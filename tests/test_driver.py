@@ -77,3 +77,14 @@ def test_variable_hold_uses_swipe_with_equal_coords():
     assert cmd[:2] == ("shell", "input") and cmd[2] == "swipe"
     assert cmd[3:5] == ("500", "800") and cmd[5:7] == ("500", "800")
     assert cfg.tap_hold_ms[0] <= int(cmd[7]) <= cfg.tap_hold_ms[1]
+
+def test_human_disabled_overrides_hold_flag():
+    """При human_enabled=False старое поведение соблюдается точно,
+    даже если human_tap_hold=True и Human передан. Иначе нарушается
+    гарантия совместимости."""
+    cfg = Config(human_enabled=False, human_tap_hold=True, jitter_px=0)
+    drv, calls = _drv_with_human(cfg)
+    drv.tap(Box(500, 800, 200, 60))
+    cmd = calls[0]
+    # Обязано быть input tap, а не swipe, несмотря на human_tap_hold=True
+    assert cmd == ("shell", "input", "tap", "500", "800")
