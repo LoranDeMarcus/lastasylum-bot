@@ -2,7 +2,7 @@
 import time
 import threading
 from config import Config
-from src.gui import BotController, apply_flask_threshold
+from src.gui import BotController, apply_flask_threshold, apply_flask_count
 
 class DummyEngine:
     def __init__(self):
@@ -60,3 +60,22 @@ def test_apply_flask_threshold_accepts_zero_and_spaces():
     cfg = Config()
     assert apply_flask_threshold(cfg, "  0 ") == 0
     assert cfg.flask_stop_threshold == 0
+
+# --- Поле «Склянок сейчас» ---
+
+def test_apply_flask_count_sets_value():
+    cfg = Config()
+    assert apply_flask_count(cfg, "251") == 251
+    assert cfg.flask_count_start == 251
+
+def test_apply_flask_count_zero_means_unknown():
+    cfg = Config()
+    assert apply_flask_count(cfg, "0") == 0
+    assert cfg.flask_count_start == 0
+
+def test_apply_flask_count_ignores_garbage_and_negative():
+    cfg = Config()
+    cfg.flask_count_start = 200
+    assert apply_flask_count(cfg, "две") == 200
+    assert apply_flask_count(cfg, "-1") == 200
+    assert cfg.flask_count_start == 200

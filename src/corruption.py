@@ -18,7 +18,7 @@ class CorruptionActions:
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
-        self.last_flasks = None       # последнее прочитанное «В наличии: N»
+        self.flasks_used = 0          # сколько склянок потрачено за сессию
 
     def _wait_any(self, wanted, timeout_s=None):
         """Ждём любой из перечисленных экранов; возвращаем какой дождались."""
@@ -62,22 +62,49 @@ class CorruptionActions:
         self._safe_back()
         return "failed"
 
-    def _side_trip(self, refill, want_flasks):
-        """Склянки читаются/тратятся ТОЛЬКО с превью: с карты «+» тапнет кнопку
-        дома. refill — применить фиолетовую +50; want_flasks — только прочитать
-        остаток. Окно не открылось -> last_flasks остаётся неизвестным.
-        Возвращает True, если в окно энергии реально ходили."""
-        if refill:
-            n = self.actions.refill_energy()
-        elif want_flasks:
-            n = self.actions.flasks_left()
-        else:
+    def _use_flask(self):
+        """С превью «Увеличить энергию» -> окно энергии -> «Использовать» у
+        ФИОЛЕТОВОЙ склянки +50 -> закрыть окно. True, если склянка применена.
+
+        Строк в окне 3 или 4 (при четырёх третья — зелёная +10), поэтому Y
+        кнопки берём от найденной строки фиолетовой склянки, а не из конфига:
+        фиксированная координата промахнулась бы на другой вёрстке."""
+        self.driver.tap(*self.cfg.corruption_boost_energy_xy)
+        self.sleep(1.2)
+        img = self.driver.screenshot()
+        if not self.vision.energy_window_open(img):
+            self.log("  окно энергии не открылось")
             return False
-        self.last_flasks = n if n is not None and n >= 0 else None
+        row_y = self.vision.flask_row_y(img)
+        if row_y is None:
+            self.log("  фиолетовая склянка +50 не найдена — склянку не тратим")
+            self._close_energy_window()
+            return False
+        qty = self.vision.flask_use_qty(img, row_y)
+        if qty is None:
+            self.log("  не прочитал, сколько склянок уйдёт — не тратим вслепую")
+            self._close_energy_window()
+            return False
+        self.log(f"  применяю фиолетовую склянку +50 x{qty} (строка y={row_y})")
+        self.driver.tap(self.cfg.flask_use_x, row_y)
+        self.sleep(1.2)
+        self.flasks_used += qty
+        self._close_energy_window()
         return True
 
-    def run_once(self, refill=False, want_flasks=False):
-        """Один заход поиск->штурм. 'dispatched' | 'failed' | 'skip_unwinnable'."""
+    def _close_energy_window(self):
+        pos = self.vision.find_button(self.driver.screenshot(), "energy_close")
+        self.driver.tap(*(pos if pos is not None else self.cfg.energy_window_close_xy))
+        self.sleep(1.0)
+
+    def run_once(self, refill=False):
+        """Один заход поиск->штурм.
+
+        refill — разрешено ли потратить фиолетовую склянку +50, если игра
+        сказала, что энергии не хватает (решение о разрешении принимает
+        движок по порогу остатка).
+
+        'dispatched' | 'failed' | 'low_energy' | 'skip_unwinnable'."""
         self.driver.tap(*self.cfg.corruption_search_icon_xy)
         self.sleep(0.8)
         if not self._wait_dialog():
@@ -101,12 +128,18 @@ class CorruptionActions:
             return self._abort("превью штурма не открылось")
         if screen == 'preview_low_energy':
             # Энергии меньше стоимости штурма: игра подменяет «Начать Штурм»
-            # на «Увеличить энергию». Отправить нечем — выходим чисто, без
-            # тапов по окну энергии (его вёрстка плавает, см. спеку).
-            self.log("  энергии не хватает на штурм (кнопка «Увеличить энергию»)")
-            self.actions.close_preview()
-            self.sleep(0.6)
-            return "low_energy"
+            # на «Увеличить энергию». Она же — вход в окно энергии.
+            if not refill:
+                self.log("  энергии не хватает на штурм (кнопка «Увеличить энергию»)")
+                self.actions.close_preview()
+                self.sleep(0.6)
+                return "low_energy"
+            if not self._use_flask():
+                self.actions.close_preview()
+                self.sleep(0.6)
+                return "low_energy"
+            if not self._wait_screen('preview'):
+                return self._abort("после склянки превью не вернулось")
 
         # Гейт победы по умолчанию выключен: уровень скверны фиксирует человек,
         # значит босс заведомо проходим (см. спеку).
@@ -117,12 +150,6 @@ class CorruptionActions:
                 self.actions.close_preview()
                 self.sleep(0.6)
                 return "skip_unwinnable"
-
-        if self._side_trip(refill, want_flasks):
-            # окно энергии перекрывает превью и закрывается с анимацией —
-            # без ожидания «Начать Штурм» ещё не виден и заход срывается
-            if not self._wait_screen('preview'):
-                return self._abort("превью не вернулось после окна энергии")
 
         send = self.vision.find_button(self.driver.screenshot(), "start_assault")
         if send is None:

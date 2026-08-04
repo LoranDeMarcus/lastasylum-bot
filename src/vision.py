@@ -67,6 +67,38 @@ class Vision:
             return 'attack'
         return None
 
+    def energy_window_open(self, img):
+        """Открыто ли окно «Восстановить энергию» (по заголовку)."""
+        return self.find_button(img, "energy_window_title") is not None
+
+    def flask_row_y(self, img):
+        """Вертикальный центр строки с ФИОЛЕТОВОЙ склянкой +50 в окне энергии,
+        или None если её не видно.
+
+        Строк бывает 3 или 4: при четырёх третьей идёт зелёная склянка +10 и
+        всё ниже съезжает, поэтому фиксированная координата «Использовать»
+        промахивается. Фиолетовая всегда ПОСЛЕДНЯЯ строка — из всех совпадений
+        берём самое нижнее."""
+        tpl = self._state_tpl("flask_purple")
+        if tpl is None or img.shape[0] < tpl.shape[0] or img.shape[1] < tpl.shape[1]:
+            return None
+        res = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
+        ys, _ = np.where(res >= self.cfg.template_match_threshold)
+        if len(ys) == 0:
+            return None
+        return int(ys.max() + tpl.shape[0] // 2)
+
+    def flask_use_qty(self, img, row_y):
+        """Сколько склянок уйдёт по кнопке «Использовать» — число в счётчике
+        количества этой строки (игра сама ставит столько, сколько нужно до
+        полной энергии, у нас видели 2). None, если не прочиталось.
+
+        Считать обязательно: один тап может потратить не одну склянку, и без
+        этого локальный учёт остатка разъедется с реальностью."""
+        x, dy, w, h = self.cfg.flask_qty_region_rel
+        return self.reader.read(img, (x, row_y + dy, w, h),
+                                white_threshold=self.cfg.energy_white_threshold)
+
     def exit_dialog_open(self, img):
         """Открыт ли диалог «Выйти из игры?». Он появляется от системной
         «назад» на чистой карте — то есть ровно на пути восстановления бота

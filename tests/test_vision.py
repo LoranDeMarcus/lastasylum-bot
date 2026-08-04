@@ -170,6 +170,32 @@ def test_corruption_screen_normal_preview_not_low_energy():
     v = Vision(cfg, TemplateReader(cfg))
     assert v.corruption_screen(_ref("25_corruption_preview_energy52.png")) == "preview"
 
+def test_energy_window_open_on_refill_window():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.energy_window_open(_ref("27_energy_window_3rows.png")) is True
+
+def test_energy_window_open_false_elsewhere():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.energy_window_open(_ref("26_preview_low_energy.png")) is False
+    assert v.energy_window_open(_ref("11_corruption_map_idle.png")) is False
+
+def test_flask_row_y_finds_purple_row():
+    """Строк бывает 3 или 4 — координата «Использовать» плавает, поэтому
+    строку ищем по иконке фиолетовой склянки."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    y = v.flask_row_y(_ref("27_energy_window_3rows.png"))
+    assert y is not None
+    assert 1290 <= y <= 1370        # строка фиолетовой склянки на этом кадре
+
+def test_flask_row_y_none_without_energy_window():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.flask_row_y(_ref("11_corruption_map_idle.png")) is None
+    assert v.flask_row_y(_ref("26_preview_low_energy.png")) is None
+
 def test_corruption_screen_none_on_energy_window():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))

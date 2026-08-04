@@ -32,9 +32,12 @@ class BotEngine:
             self.flasks = 10 ** 9        # в dry-run не открываем энергоокно
             self.log("Старт (DRY-RUN: тапов не будет).")
         elif self.cfg.strategy == "corruption":
-            # окно энергии открывается только с превью -> склянки прочитаем там
-            self.flasks = None
-            self.log("Старт («Элитная скверна»). Склянки прочитаем на первом превью.")
+            # «В наличии: N» в окне энергии перекрыт счётчиком количества и не
+            # читается -> остаток ведём локально от значения, заданного в GUI.
+            # 0 = неизвестно: порог не ограничивает, склянки тратятся свободно.
+            self.flasks = self.cfg.flask_count_start or None
+            self.log("Старт («Элитная скверна»). Склянок по учёту: "
+                     + (str(self.flasks) if self.flasks else "неизвестно"))
         elif self.cfg.use_search_strategy:
             # окно энергии открывается только с превью отправки; с карты «+»
             # тапнет кнопку дома -> склянки прочитаем на первом же превью
@@ -144,30 +147,33 @@ class BotEngine:
             return None
 
         energy = self.vision.read_energy(img)
-        refill = energy is not None and energy < self.cfg.corruption_energy_cost
-        # Склянки нужны ТОЛЬКО для рефилла, поэтому в окно энергии не ходим,
-        # пока энергии хватает: лишний заход перекрывает превью и лишь
-        # добавляет шансов сорвать отправку.
-        want_flasks = refill and self.flasks is None
-        if want_flasks:
-            # сколько склянок — ещё не знаем; сначала прочитаем, не тратя
+        # Разрешаем тратить склянку, пока учтённый остаток выше порога.
+        # Остаток ведём локально (в окне энергии «В наличии: N» перекрыт
+        # счётчиком количества и не читается) — его задаёт человек в GUI.
+        # Остаток НЕ задан -> склянки не тратим: расходник невосстановим, а
+        # соблюсти заданный порог вслепую невозможно.
+        if self.flasks is None:
             refill = False
-        elif refill and self.flasks < self.cfg.flask_stop_threshold:
-            self.log(f"Энергии {energy}, склянок {self.flasks} < "
-                     f"{self.cfg.flask_stop_threshold} — стоп.")
-            return Action('stop')
+        else:
+            refill = self.flasks > self.cfg.flask_stop_threshold
+            if not refill:
+                self.log(f"Склянок {self.flasks} <= порога "
+                         f"{self.cfg.flask_stop_threshold} — склянки не тратим.")
 
         self.log(f"[отрядов={active}/{self.cfg.squad_total}] энергия={energy} "
-                 f"склянок={self.flasks}" + (" (+рефилл склянкой)" if refill else "")
+                 f"склянок={self.flasks}" + (" (+рефилл разрешён)" if refill else "")
                  + " -> штурм скверны")
         if self.cfg.dry_run:
             self.sleep(1.0)
             return Action('assault_boss')
 
-        res = self.corruption.run_once(refill=refill, want_flasks=want_flasks)
+        used_before = self.corruption.flasks_used
+        res = self.corruption.run_once(refill=refill)
         self.log(f"  Штурм скверны -> {res}")
-        if self.corruption.last_flasks is not None:
-            self.flasks = self.corruption.last_flasks
+        spent = self.corruption.flasks_used - used_before
+        if spent and self.flasks is not None:
+            self.flasks = max(0, self.flasks - spent)
+            self.log(f"  склянок потрачено {spent}, осталось (по учёту) {self.flasks}")
 
         if res == 'low_energy':
             # Превью — источник истины: игра сама сказала, что энергии мало.

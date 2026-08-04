@@ -22,6 +22,21 @@ class BotController:
     def stop(self):
         self._stop.set()
 
+def apply_flask_count(cfg, raw):
+    """Применить введённый в GUI текущий остаток склянок. Его приходится
+    задавать руками: в окне энергии «В наличии: N» перекрыт счётчиком
+    количества и не читается, поэтому бот ведёт остаток локально, вычитая
+    реально потраченное. 0 = «не знаю», тогда порог не ограничивает.
+    Мусорный/отрицательный ввод игнорируем."""
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return cfg.flask_count_start
+    if n < 0:
+        return cfg.flask_count_start
+    cfg.flask_count_start = n
+    return n
+
 def apply_flask_threshold(cfg, raw):
     """Применить введённый в GUI нижний порог остатка склянок: ниже него бот
     больше не тратит склянки на рефилл (и останавливается, когда энергии не
@@ -63,16 +78,21 @@ def run_gui(controller, log_queue=None, cfg=None):
 
     if cfg is not None:
         row = tk.Frame(root); row.pack(pady=(0, 2))
-        tk.Label(row, text="Мин. остаток склянок:").pack(side="left", padx=(0, 6))
-        var = tk.StringVar(value=str(cfg.flask_stop_threshold))
-        tk.Entry(row, width=8, textvariable=var).pack(side="left")
+        tk.Label(row, text="Склянок сейчас:").pack(side="left", padx=(0, 4))
+        count_var = tk.StringVar(value=str(cfg.flask_count_start))
+        tk.Entry(row, width=7, textvariable=count_var).pack(side="left", padx=(0, 10))
+        tk.Label(row, text="Мин. остаток:").pack(side="left", padx=(0, 4))
+        thr_var = tk.StringVar(value=str(cfg.flask_stop_threshold))
+        tk.Entry(row, width=7, textvariable=thr_var).pack(side="left")
 
-        def apply_threshold():
-            var.set(str(apply_flask_threshold(cfg, var.get())))
+        def apply_settings():
+            count_var.set(str(apply_flask_count(cfg, count_var.get())))
+            thr_var.set(str(apply_flask_threshold(cfg, thr_var.get())))
             if log_queue is not None:
-                log_queue.put(f"Мин. остаток склянок: {cfg.flask_stop_threshold}")
+                log_queue.put(f"Склянок: {cfg.flask_count_start}, "
+                              f"не тратить ниже {cfg.flask_stop_threshold}")
 
-        tk.Button(row, text="Применить", command=apply_threshold).pack(side="left", padx=6)
+        tk.Button(row, text="Применить", command=apply_settings).pack(side="left", padx=6)
 
     btns = tk.Frame(root); btns.pack(pady=6)
     tk.Button(btns, text="Start", width=12,

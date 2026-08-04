@@ -86,12 +86,15 @@ def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=Non
 # --- Режим «Элитная скверна» ---
 
 class FakeCorruption:
-    def __init__(self, results=()):
+    def __init__(self, results=(), spend=0):
         self.results = list(results)
         self.calls = []
-        self.last_flasks = None
-    def run_once(self, refill=False, want_flasks=False):
-        self.calls.append((refill, want_flasks))
+        self.flasks_used = 0
+        self._spend = spend          # сколько склянок «тратит» каждый заход
+    def run_once(self, refill=False):
+        self.calls.append(refill)
+        if refill:
+            self.flasks_used += self._spend
         return self.results.pop(0) if self.results else "dispatched"
 
 def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251):
@@ -106,7 +109,7 @@ def test_corruption_dispatches_when_squad_free():
     corr = FakeCorruption(["dispatched"])
     eng = _mk_corruption_engine(corr, active=1)
     assert eng.one_iteration().type == "assault_boss"
-    assert corr.calls == [(False, False)]
+    assert corr.calls == [True]              # склянок 251 > порога -> рефилл разрешён
 
 def test_corruption_waits_when_all_squads_busy():
     corr = FakeCorruption()
@@ -118,50 +121,45 @@ def test_corruption_dispatches_on_last_free_slot():
     corr = FakeCorruption(["dispatched"])
     eng = _mk_corruption_engine(corr, active=3)
     assert eng.one_iteration().type == "assault_boss"
-    assert corr.calls == [(False, False)]
 
-def test_corruption_requests_refill_when_energy_low():
+def test_corruption_forbids_refill_at_or_below_threshold():
+    """Порог из GUI: на нём и ниже склянки не тратим, но фармить продолжаем,
+    пока хватает энергии."""
     corr = FakeCorruption(["dispatched"])
-    eng = _mk_corruption_engine(corr, energy=15, flasks=251)   # < corruption_energy_cost
-    eng.one_iteration()
-    assert corr.calls == [(True, False)]
-
-def test_corruption_stops_when_energy_low_and_flasks_below_threshold():
-    corr = FakeCorruption()
-    eng = _mk_corruption_engine(corr, energy=15, flasks=100)
-    assert eng.one_iteration().type == "stop"
-    assert corr.calls == []
-
-def test_corruption_keeps_farming_on_low_flasks_while_energy_lasts():
-    """Склянок мало, но энергии хватает -> продолжаем, стоп только когда
-    энергия кончится (решение юзера: ждём отряды, стоп по энергии)."""
-    corr = FakeCorruption(["dispatched"])
-    eng = _mk_corruption_engine(corr, energy=80, flasks=100)
+    eng = _mk_corruption_engine(corr, flasks=180)     # ровно порог
     assert eng.one_iteration().type == "assault_boss"
+    assert corr.calls == [False]
 
-def test_corruption_reads_flasks_first_time_instead_of_spending():
+def test_corruption_allows_refill_above_threshold():
     corr = FakeCorruption(["dispatched"])
-    eng = _mk_corruption_engine(corr, energy=15)
-    eng.flasks = None                        # ещё не читали
+    eng = _mk_corruption_engine(corr, flasks=181)
     eng.one_iteration()
-    assert corr.calls == [(False, True)]     # читаем, но склянку не тратим
+    assert corr.calls == [True]
 
-def test_corruption_updates_flask_memory_from_side_trip():
+def test_corruption_refuses_refill_when_stock_unknown():
+    """Остаток не задан (0 в GUI) -> склянки не тратим: расходник
+    невосстановим, а соблюсти порог вслепую нельзя."""
     corr = FakeCorruption(["dispatched"])
-    corr.last_flasks = 240
-    eng = _mk_corruption_engine(corr, energy=15)
+    eng = _mk_corruption_engine(corr)
     eng.flasks = None
     eng.one_iteration()
-    assert eng.flasks == 240
+    assert corr.calls == [False]
 
-def test_corruption_skips_energy_window_while_energy_is_enough():
-    """Склянки нужны только под рефилл: пока энергии хватает, в окно энергии
-    не ходим — лишний заход перекрывает превью и рискует сорвать отправку."""
-    corr = FakeCorruption(["dispatched"])
-    eng = _mk_corruption_engine(corr, energy=80)
-    eng.flasks = None
+def test_corruption_subtracts_actually_spent_flasks():
+    """Один тап «Использовать» может потратить не одну склянку — вычитаем
+    прочитанное количество, иначе учёт разъедется."""
+    corr = FakeCorruption(["dispatched"], spend=2)
+    eng = _mk_corruption_engine(corr, flasks=200)
     eng.one_iteration()
-    assert corr.calls == [(False, False)]
+    assert eng.flasks == 198
+
+def test_corruption_stops_spending_once_threshold_reached():
+    corr = FakeCorruption(["dispatched", "dispatched"], spend=2)
+    eng = _mk_corruption_engine(corr, flasks=182)
+    eng.one_iteration()                      # 182 -> 180
+    assert eng.flasks == 180
+    eng.one_iteration()                      # на пороге -> больше не тратим
+    assert corr.calls == [True, False]
 
 def test_corruption_stops_immediately_on_low_energy_verdict():
     """Превью сказало «энергии мало» — это источник истины, стопимся сразу,
@@ -192,12 +190,19 @@ def test_corruption_dry_run_does_not_act():
     assert eng.one_iteration().type == "assault_boss"
     assert corr.calls == []
 
-def test_corruption_start_defers_flask_read_to_preview():
+def test_corruption_start_takes_flask_stock_from_config():
     corr = FakeCorruption()
     eng = _mk_corruption_engine(corr)
-    eng.flasks = None
+    eng.cfg.flask_count_start = 240
     eng.start()
-    assert eng.flasks is None                # окно энергии только с превью
+    assert eng.flasks == 240
+
+def test_corruption_start_treats_zero_stock_as_unknown():
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr)
+    eng.cfg.flask_count_start = 0
+    eng.start()
+    assert eng.flasks is None                # неизвестно -> порог не ограничивает
 
 def test_search_strategy_searches_when_idle():
     act = FakeActions()
