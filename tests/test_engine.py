@@ -86,15 +86,20 @@ def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=Non
 # --- Режим «Элитная скверна» ---
 
 class FakeCorruption:
-    def __init__(self, results=(), spend=0):
+    def __init__(self, results=(), spend=0, stock=None):
         self.results = list(results)
         self.calls = []
         self.flasks_used = 0
+        self.last_flask_stock = None
         self._spend = spend          # сколько склянок «тратит» каждый заход
+        self._stock = stock          # что «прочитано» в «В наличии: N»
     def run_once(self, refill=False):
         self.calls.append(refill)
         if refill:
             self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+                self._stock -= self._spend
         return self.results.pop(0) if self.results else "dispatched"
 
 def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251):
@@ -136,18 +141,23 @@ def test_corruption_allows_refill_above_threshold():
     eng.one_iteration()
     assert corr.calls == [True]
 
-def test_corruption_refuses_refill_when_stock_unknown():
-    """Остаток не задан (0 в GUI) -> склянки не тратим: расходник
-    невосстановим, а соблюсти порог вслепую нельзя."""
-    corr = FakeCorruption(["dispatched"])
+def test_corruption_allows_probe_refill_when_stock_unknown():
+    """«В наличии: N» читается только ПОСЛЕ применения, поэтому первый рефилл
+    разрешён вслепую — он же и выясняет реальный остаток."""
+    corr = FakeCorruption(["dispatched"], spend=2, stock=273)
     eng = _mk_corruption_engine(corr)
     eng.flasks = None
     eng.one_iteration()
-    assert corr.calls == [False]
+    assert corr.calls == [True]
+    assert eng.flasks == 273           # остаток стал известен
 
-def test_corruption_subtracts_actually_spent_flasks():
-    """Один тап «Использовать» может потратить не одну склянку — вычитаем
-    прочитанное количество, иначе учёт разъедется."""
+def test_corruption_prefers_read_stock_over_local_count():
+    corr = FakeCorruption(["dispatched"], spend=2, stock=273)
+    eng = _mk_corruption_engine(corr, flasks=500)   # учёт был неверным
+    eng.one_iteration()
+    assert eng.flasks == 273                        # верим прочитанному
+
+def test_corruption_subtracts_spent_when_stock_unreadable():
     corr = FakeCorruption(["dispatched"], spend=2)
     eng = _mk_corruption_engine(corr, flasks=200)
     eng.one_iteration()

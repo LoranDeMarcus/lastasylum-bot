@@ -148,17 +148,14 @@ class BotEngine:
 
         energy = self.vision.read_energy(img)
         # Разрешаем тратить склянку, пока учтённый остаток выше порога.
-        # Остаток ведём локально (в окне энергии «В наличии: N» перекрыт
-        # счётчиком количества и не читается) — его задаёт человек в GUI.
-        # Остаток НЕ задан -> склянки не тратим: расходник невосстановим, а
-        # соблюсти заданный порог вслепую невозможно.
-        if self.flasks is None:
-            refill = False
-        else:
-            refill = self.flasks > self.cfg.flask_stop_threshold
-            if not refill:
-                self.log(f"Склянок {self.flasks} <= порога "
-                         f"{self.cfg.flask_stop_threshold} — склянки не тратим.")
+        # Остаток «В наличии: N» читается только ПОСЛЕ применения склянок
+        # (до этого его перекрывает счётчик количества). Поэтому пока остаток
+        # неизвестен, разрешаем один рефилл — он же и покажет реальное число,
+        # после чего порог начинает работать точно.
+        refill = self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+        if not refill:
+            self.log(f"Склянок {self.flasks} <= порога "
+                     f"{self.cfg.flask_stop_threshold} — склянки не тратим.")
 
         self.log(f"[отрядов={active}/{self.cfg.squad_total}] энергия={energy} "
                  f"склянок={self.flasks}" + (" (+рефилл разрешён)" if refill else "")
@@ -171,9 +168,13 @@ class BotEngine:
         res = self.corruption.run_once(refill=refill)
         self.log(f"  Штурм скверны -> {res}")
         spent = self.corruption.flasks_used - used_before
-        if spent and self.flasks is not None:
+        if self.corruption.last_flask_stock is not None:
+            # прочитанное «В наличии: N» точнее локального учёта
+            self.flasks = self.corruption.last_flask_stock
+        elif spent and self.flasks is not None:
             self.flasks = max(0, self.flasks - spent)
-            self.log(f"  склянок потрачено {spent}, осталось (по учёту) {self.flasks}")
+        if spent:
+            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
 
         if res == 'low_energy':
             # Превью — источник истины: игра сама сказала, что энергии мало.

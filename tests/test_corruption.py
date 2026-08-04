@@ -20,7 +20,7 @@ class FakeDriver:
 class FakeVision:
     def __init__(self, screen_by_frame, buttons_by_frame=None,
                  win_by_frame=None, dialog_frames=(), exit_frames=(),
-                 energy_frames=(), flask_row=1328, flask_qty=2):
+                 energy_frames=(), flask_row=1328, flask_qty=2, flask_stock=273):
         self.screen_by_frame = screen_by_frame
         self.buttons_by_frame = buttons_by_frame or {}
         self.win_by_frame = win_by_frame or {}
@@ -29,12 +29,15 @@ class FakeVision:
         self.energy_frames = set(energy_frames)
         self.flask_row = flask_row
         self.flask_qty = flask_qty
+        self.flask_stock = flask_stock
     def energy_window_open(self, img):
         return img in self.energy_frames
     def flask_row_y(self, img):
         return self.flask_row
     def flask_use_qty(self, img, row_y):
         return self.flask_qty
+    def read_flask_stock(self, img, row_y):
+        return self.flask_stock
     def corruption_screen(self, img):
         return self.screen_by_frame.get(img)
     def search_dialog_open(self, img):
@@ -153,9 +156,9 @@ def test_run_once_uses_fixed_coords_when_assault_button_not_matched():
     assert ASSAULT_MATCH not in drv.taps
 
 def _low_energy_then_refill():
-    """Превью с «Увеличить энергию» -> окно энергии -> склянка -> превью."""
-    drv = FakeDriver(["dlg", "dlg", "panel", "panel", "lowe",
-                      "energy", "energy", "preview", "preview"])
+    """Превью с «Увеличить энергию» -> окно энергии -> склянки -> превью."""
+    drv = FakeDriver(["dlg", "dlg", "panel", "panel", "lowe"]
+                     + ["energy"] * 3 + ["preview"] * 3)
     vis = FakeVision(
         screen_by_frame={"dlg": "dialog", "panel": "boss_panel",
                          "lowe": "preview_low_energy", "preview": "preview"},
@@ -177,13 +180,39 @@ def test_refill_uses_purple_flask_row_not_fixed_coord():
     c, res = _run(drv, vis, acts, cfg, refill=True)
     assert res == "dispatched"
     assert (cfg.flask_use_x, 1540) in drv.taps
-    assert c.flasks_used == 2            # счётчик количества показал 2
 
-def test_refill_counts_actual_quantity_used():
+def test_refill_taps_twice_for_100_energy():
+    """Один тап = одна склянка (+50). Два тапа -> +100 энергии."""
+    cfg = Config()
     drv, vis, acts = _low_energy_then_refill()
-    vis.flask_qty = 3
+    c, res = _run(drv, vis, acts, cfg, refill=True)
+    assert res == "dispatched"
+    assert drv.taps.count((cfg.flask_use_x, vis.flask_row)) == 2
+    assert c.flasks_used == 2
+
+def test_refill_does_not_tap_more_than_energy_allows():
+    """Счётчик — верхний предел: влезает одна склянка -> тапаем один раз,
+    второй тап пропал бы впустую."""
+    cfg = Config()
+    drv, vis, acts = _low_energy_then_refill()
+    vis.flask_qty = 1
+    c, _ = _run(drv, vis, acts, cfg, refill=True)
+    assert drv.taps.count((cfg.flask_use_x, vis.flask_row)) == 1
+    assert c.flasks_used == 1
+
+def test_refill_reads_real_stock_after_use():
+    """После применения счётчик исчезает и открывается «В наличии: N» —
+    это авторитетный остаток."""
+    drv, vis, acts = _low_energy_then_refill()
     c, _ = _run(drv, vis, acts, refill=True)
-    assert c.flasks_used == 3
+    assert c.last_flask_stock == 273
+
+def test_refill_taps_default_when_counter_unreadable():
+    cfg = Config()
+    drv, vis, acts = _low_energy_then_refill()
+    vis.flask_qty = None
+    c, _ = _run(drv, vis, acts, cfg, refill=True)
+    assert c.flasks_used == cfg.flask_use_taps
 
 def test_refill_skipped_when_not_allowed():
     cfg = Config()
@@ -193,14 +222,6 @@ def test_refill_skipped_when_not_allowed():
     assert c.flasks_used == 0
     assert cfg.corruption_boost_energy_xy not in drv.taps
     assert acts.closed == 1
-
-def test_refill_does_not_spend_when_quantity_unreadable():
-    """Не прочитали, сколько уйдёт -> не тратим вслепую, учёт остался бы кривым."""
-    drv, vis, acts = _low_energy_then_refill()
-    vis.flask_qty = None
-    c, res = _run(drv, vis, acts, refill=True)
-    assert res == "low_energy"
-    assert c.flasks_used == 0
 
 def test_refill_does_not_spend_when_purple_row_not_found():
     drv, vis, acts = _low_energy_then_refill()

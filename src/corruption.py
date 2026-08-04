@@ -19,6 +19,7 @@ class CorruptionActions:
         self.log = log
         self.sleep = sleep
         self.flasks_used = 0          # сколько склянок потрачено за сессию
+        self.last_flask_stock = None  # «В наличии: N», прочитанное после применения
 
     def _wait_any(self, wanted, timeout_s=None):
         """Ждём любой из перечисленных экранов; возвращаем какой дождались."""
@@ -80,15 +81,31 @@ class CorruptionActions:
             self.log("  фиолетовая склянка +50 не найдена — склянку не тратим")
             self._close_energy_window()
             return False
-        qty = self.vision.flask_use_qty(img, row_y)
-        if qty is None:
-            self.log("  не прочитал, сколько склянок уйдёт — не тратим вслепую")
+
+        # Счётчик показывает, сколько склянок ещё влезет по энергии. Один тап
+        # тратит ровно одну (+50), поэтому тапаем не больше этого предела —
+        # лишний тап просто пропал бы впустую.
+        limit = self.vision.flask_use_qty(img, row_y)
+        taps = self.cfg.flask_use_taps if limit is None else min(self.cfg.flask_use_taps, limit)
+        if taps < 1:
+            self.log("  энергии уже достаточно, склянки не нужны")
             self._close_energy_window()
             return False
-        self.log(f"  применяю фиолетовую склянку +50 x{qty} (строка y={row_y})")
-        self.driver.tap(self.cfg.flask_use_x, row_y)
-        self.sleep(1.2)
-        self.flasks_used += qty
+
+        self.log(f"  применяю фиолетовую склянку +50 x{taps} (строка y={row_y})")
+        for _ in range(taps):
+            self.driver.tap(self.cfg.flask_use_x, row_y)
+            self.sleep(1.0)
+            self.flasks_used += 1
+
+        # После применения счётчик исчезает и открывается «В наличии: N» —
+        # это авторитетный остаток, точнее локального учёта.
+        img = self.driver.screenshot()
+        row_y = self.vision.flask_row_y(img) or row_y
+        stock = self.vision.read_flask_stock(img, row_y)
+        if stock is not None:
+            self.last_flask_stock = stock
+            self.log(f"  склянок в наличии: {stock}")
         self._close_energy_window()
         return True
 

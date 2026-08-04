@@ -190,6 +190,36 @@ def test_flask_row_y_finds_purple_row():
     assert y is not None
     assert 1290 <= y <= 1370        # строка фиолетовой склянки на этом кадре
 
+def test_read_flask_stock_after_use():
+    """«В наличии: N» открывается, когда счётчик количества исчезает —
+    то есть после применения склянок."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    img = _ref("28_energy_window_stock273.png")
+    y = v.flask_row_y(img)
+    assert v.read_flask_stock(img, y) == 273
+
+def test_read_flask_stock_hidden_behind_quantity_counter():
+    """Пока счётчик на месте, он перекрывает число — читать нечего."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    img = _ref("27_energy_window_3rows.png")
+    y = v.flask_row_y(img)
+    assert v.read_flask_stock(img, y) != 273
+
+def test_flask_use_qty_reads_counter():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    img = _ref("27_energy_window_3rows.png")
+    y = v.flask_row_y(img)
+    assert v.flask_use_qty(img, y) == 2      # при 13/120 влезает 2 склянки
+
+def test_flask_row_found_in_both_window_states():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.flask_row_y(_ref("27_energy_window_3rows.png")) is not None
+    assert v.flask_row_y(_ref("28_energy_window_stock273.png")) is not None
+
 def test_flask_row_y_none_without_energy_window():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))
