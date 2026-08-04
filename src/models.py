@@ -23,6 +23,27 @@ class Action:
     type: str
     target: Optional[Target] = None
 
+@dataclass(frozen=True)
+class Box:
+    """Прямоугольник кнопки: центр (x, y) и размер (w, h).
+
+    Кнопка — не точка: тап в одну и ту же выверенную координату это машинный
+    признак. Размер нужен, чтобы прийти в случайную точку ВНУТРИ кнопки.
+    У шаблонных кнопок он берётся даром из размеров шаблона, у фиксированных
+    координат — из cfg.tap_sizes."""
+    x: int
+    y: int
+    w: int
+    h: int
+
+    @property
+    def center(self):
+        return (self.x, self.y)
+
+    @classmethod
+    def at(cls, xy, size):
+        return cls(int(xy[0]), int(xy[1]), int(size[0]), int(size[1]))
+
 def distance(ax: int, ay: int, bx: int, by: int) -> float:
     return math.hypot(ax - bx, ay - by)
 

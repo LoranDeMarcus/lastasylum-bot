@@ -1,6 +1,7 @@
 import random
 from config import Config
 from src.driver import jitter, AdbDriver
+from src.models import Box
 
 def test_back_sends_keyevent_back():
     """BACK закрывает случайно открытый диалог -> вид снова чистый."""
@@ -20,3 +21,15 @@ def test_jitter_within_bounds():
 def test_jitter_zero_px_is_identity():
     rng = random.Random(0)
     assert jitter(10, 20, px=0, rng=rng) == (10, 20)
+
+def test_tap_accepts_box_and_tuple():
+    """tap принимает и Box, и голый кортеж — вторые остаются у tools/*."""
+    drv = AdbDriver(Config(jitter_px=0))
+    calls = []
+    drv._adb = lambda *a, **k: calls.append(a)
+
+    drv.tap(Box(500, 800, 200, 60))
+    drv.tap((10, 20))
+
+    assert calls == [("shell", "input", "tap", "500", "800"),
+                     ("shell", "input", "tap", "10", "20")]

@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from src.models import Target
+from src.models import Target, Box
 
 class Vision:
     def __init__(self, cfg, reader):
@@ -238,6 +238,10 @@ class Vision:
         return self._state_cache[name]
 
     def find_button(self, img, name):
+        """Кнопка по шаблону -> Box (центр + размер шаблона) или None.
+
+        Размер отдаём наружу, потому что тап должен приходить в случайную
+        точку внутри кнопки, а не всегда в её центр."""
         path = os.path.join(self.cfg.templates_dir, f"{name}.png")
         tpl = cv2.imread(path, cv2.IMREAD_COLOR)
         if tpl is None:
@@ -247,7 +251,7 @@ class Vision:
         if maxv < self.cfg.template_match_threshold:
             return None
         th, tw = tpl.shape[:2]
-        return (maxloc[0] + tw // 2, maxloc[1] + th // 2)
+        return Box(maxloc[0] + tw // 2, maxloc[1] + th // 2, tw, th)
 
     def read_energy(self, img):
         """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,

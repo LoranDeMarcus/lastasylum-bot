@@ -3,6 +3,7 @@ import subprocess
 from typing import Protocol
 import numpy as np
 import cv2
+from src.models import Box
 
 def jitter(x, y, px, rng):
     if px == 0:
@@ -11,7 +12,7 @@ def jitter(x, y, px, rng):
 
 class Driver(Protocol):
     def screenshot(self): ...
-    def tap(self, x, y): ...
+    def tap(self, target): ...
     def swipe(self, x1, y1, x2, y2, dur_ms): ...
 
 class AdbDriver:
@@ -34,8 +35,13 @@ class AdbDriver:
             raise RuntimeError("ADB screencap decode failed")
         return img
 
-    def tap(self, x, y):
-        jx, jy = jitter(int(x), int(y), self.cfg.jitter_px, self._rng)
+    def tap(self, target):
+        """target: Box (кнопка со своим размером) или кортеж (x, y).
+
+        Пока бьём в центр со старым jitter — человечный разброс по площади
+        кнопки появится, когда к драйверу подключат Human (см. план, Task 4)."""
+        box = target if isinstance(target, Box) else Box.at(target, self.cfg.tap_size_default)
+        jx, jy = jitter(box.x, box.y, self.cfg.jitter_px, self._rng)
         self._adb("shell", "input", "tap", str(jx), str(jy))
 
     def back(self):

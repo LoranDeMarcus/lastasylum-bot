@@ -149,3 +149,6 @@ class Config:
     squad_header_band: tuple = (0, 200, 470, 220)   # (x, y, w, h) полоса поиска якоря
     squad_header_threshold: float = 0.7             # чисто: есть 0.96-1.00, нет 0.14-0.15
     squad_count_offset: tuple = (232, -2, 22, 42)   # (dx, dy, w, h) региона цифры N от матча
+
+    # --- Антибот: человечные тапы ---
+    tap_size_default: tuple = (40, 24)   # ±20 / ±12 от центра для координат без размера

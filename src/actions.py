@@ -40,13 +40,13 @@ class Actions:
         карта зумит+центрирует цель; тогда второй тап по центру-спрайту
         открывает панель (босс крупный — обычно открывается с первого).
         None только если панель не открылась и после второго тапа."""
-        self.driver.tap(target.x, target.y)
+        self.driver.tap((target.x, target.y))
         act = self._poll_panel()
         if act is not None:
             return act
         # промах -> цель отзумлена в центр; тап по центру-спрайту
-        self.driver.tap(self.cfg.screen_w // 2,
-                        self.cfg.screen_h // 2 + self.cfg.zoom_center_tap_offset_y)
+        self.driver.tap((self.cfg.screen_w // 2,
+                         self.cfg.screen_h // 2 + self.cfg.zoom_center_tap_offset_y))
         return self._poll_panel()
 
     def _tap_action_button(self, name):
@@ -54,17 +54,17 @@ class Actions:
         pos = self.vision.find_button(self.driver.screenshot(), name)
         if pos is None:
             return False
-        self.driver.tap(*pos)
+        self.driver.tap(pos)
         return True
 
     def _select_squad(self, squad_n):
         sx, sy = self.vision.squad_slot(squad_n)
-        self.driver.tap(sx, sy)
+        self.driver.tap((sx, sy))
         self.sleep(0.4)
 
     def close_preview(self):
         """Закрыть превью/панель без отправки (тап по затемнённой области)."""
-        self.driver.tap(*self.cfg.preview_close_xy)
+        self.driver.tap(self.cfg.preview_close_xy)
 
     def _dispatch_mob_from_panel(self, refill=False, want_flasks=False):
         """С ОТКРЫТОЙ панели моба: «Атака» -> (опц. окно энергии) -> отряд 2
@@ -79,7 +79,7 @@ class Actions:
             self.last_flasks = self._energy_side_trip(use_flask=refill)
         self._select_squad(self.cfg.mob_squad)    # отряд 2
         send = self.wait_for("dispatch", timeout_s=3.0) or send
-        self.driver.tap(*send)
+        self.driver.tap(send)
         return "dispatched"
 
     def attack_mob(self, target, refill=False, want_flasks=False):
@@ -97,10 +97,10 @@ class Actions:
         """«Особое событие» -> «Поиск вора» -> «Поиск» -> тап найденного моба
         (центрируется у базы -> короткий марш). Возвращает 'attack' если
         открылась панель моба, иначе None. Координаты — фикс. вёрстка диалога."""
-        self.driver.tap(*self.cfg.event_button_xy);      self.sleep(1.2)
-        self.driver.tap(*self.cfg.search_thief_tab_xy);  self.sleep(0.6)
-        self.driver.tap(*self.cfg.search_button_xy);     self.sleep(1.6)
-        self.driver.tap(*self.cfg.search_result_xy);     self.sleep(1.0)
+        self.driver.tap(self.cfg.event_button_xy);      self.sleep(1.2)
+        self.driver.tap(self.cfg.search_thief_tab_xy);  self.sleep(0.6)
+        self.driver.tap(self.cfg.search_button_xy);     self.sleep(1.6)
+        self.driver.tap(self.cfg.search_result_xy);     self.sleep(1.0)
         act = self.vision.panel_action(self.driver.screenshot())
         if act is None:
             # диалог события мог остаться открытым (вора нет / вёрстка иная) —
@@ -145,7 +145,7 @@ class Actions:
             return "skip_unwinnable"
         self._select_squad(self.cfg.boss_squad)   # отряд 1
         send = self.wait_for("start_assault", timeout_s=3.0) or send
-        self.driver.tap(*send)
+        self.driver.tap(send)
         return "dispatched"
 
     # --- Энергия/склянки (окно «Восстановить энергию», откалибровано) ---
@@ -153,12 +153,12 @@ class Actions:
         """«+» на превью -> окно энергии. True если окно открылось (видна
         кнопка «Использовать»). Две кнопки «Использовать» идентичны, поэтому
         тапаем не по матчу, а по фикс. координате нужной (фиолетовой) склянки."""
-        self.driver.tap(*self.cfg.energy_open_xy)
+        self.driver.tap(self.cfg.energy_open_xy)
         return self.wait_for("flask_use", timeout_s=3.0) is not None
 
     def _close_energy(self):
         x = self.vision.find_button(self.driver.screenshot(), "energy_close")
-        self.driver.tap(*(x if x is not None else self.cfg.energy_close_xy))
+        self.driver.tap(x if x is not None else self.cfg.energy_close_xy)
 
     def _energy_side_trip(self, use_flask):
         """С ОТКРЫТОГО превью отправки: «+» -> окно энергии -> (опц.)
@@ -169,7 +169,7 @@ class Actions:
             self.log("  окно энергии не открылось (не превью?)")
             return None
         if use_flask:
-            self.driver.tap(*self.cfg.flask_use_xy)   # фиолетовая +50 (фикс. координата)
+            self.driver.tap(self.cfg.flask_use_xy)   # фиолетовая +50 (фикс. координата)
             self.sleep(0.4)
         n = self.vision.read_flasks(self.driver.screenshot())
         self._close_energy()

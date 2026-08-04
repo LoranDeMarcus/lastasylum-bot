@@ -281,3 +281,19 @@ def test_exit_dialog_open_false_on_map_and_other_dialogs():
     assert v.exit_dialog_open(_ref("11_corruption_map_idle.png")) is False
     assert v.exit_dialog_open(_ref("13_corruption_dialog.png")) is False
     assert v.exit_dialog_open(_ref("21_network_lost_dialog.png")) is False
+
+# --- Box: кнопка со своим размером ---
+
+def test_find_button_returns_box_with_template_size(tmp_path):
+    """Размер кнопки уже известен из шаблона — раньше он выбрасывался."""
+    tpl = np.zeros((30, 80, 3), np.uint8)
+    tpl[5:25, 10:70] = (40, 200, 255)
+    cv2.imwrite(str(tmp_path / "btn.png"), tpl)
+    img = np.zeros((400, 600, 3), np.uint8)
+    img[50:80, 100:180] = tpl
+    vis = Vision(Config(templates_dir=str(tmp_path)), reader=None)
+
+    box = vis.find_button(img, "btn")
+
+    assert (box.x, box.y) == (140, 65)      # центр совпадает со старым поведением
+    assert (box.w, box.h) == (80, 30)

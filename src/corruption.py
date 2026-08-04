@@ -53,7 +53,7 @@ class CorruptionActions:
         if self.vision.exit_dialog_open(img):
             pos = self.vision.find_button(img, "exit_cancel")
             self.log("  открылся диалог выхода из игры -> Отмена")
-            self.driver.tap(*(pos if pos is not None else self.cfg.exit_cancel_xy))
+            self.driver.tap(pos if pos is not None else self.cfg.exit_cancel_xy)
             self.sleep(0.6)
 
     def _abort(self, why):
@@ -70,7 +70,7 @@ class CorruptionActions:
         Строк в окне 3 или 4 (при четырёх третья — зелёная +10), поэтому Y
         кнопки берём от найденной строки фиолетовой склянки, а не из конфига:
         фиксированная координата промахнулась бы на другой вёрстке."""
-        self.driver.tap(*self.cfg.corruption_boost_energy_xy)
+        self.driver.tap(self.cfg.corruption_boost_energy_xy)
         self.sleep(1.2)
         img = self.driver.screenshot()
         if not self.vision.energy_window_open(img):
@@ -94,7 +94,7 @@ class CorruptionActions:
 
         self.log(f"  применяю фиолетовую склянку +50 x{taps} (строка y={row_y})")
         for _ in range(taps):
-            self.driver.tap(self.cfg.flask_use_x, row_y)
+            self.driver.tap((self.cfg.flask_use_x, row_y))
             self.sleep(1.0)
             self.flasks_used += 1
 
@@ -111,7 +111,7 @@ class CorruptionActions:
 
     def _close_energy_window(self):
         pos = self.vision.find_button(self.driver.screenshot(), "energy_close")
-        self.driver.tap(*(pos if pos is not None else self.cfg.energy_window_close_xy))
+        self.driver.tap(pos if pos is not None else self.cfg.energy_window_close_xy)
         self.sleep(1.0)
 
     def run_once(self, refill=False):
@@ -122,24 +122,24 @@ class CorruptionActions:
         движок по порогу остатка).
 
         'dispatched' | 'failed' | 'low_energy' | 'skip_unwinnable'."""
-        self.driver.tap(*self.cfg.corruption_search_icon_xy)
+        self.driver.tap(self.cfg.corruption_search_icon_xy)
         self.sleep(0.8)
         if not self._wait_dialog():
             return self._abort("диалог поиска не открылся")
 
         # вкладка может быть не выбрана -> тапаем ВСЕГДА, без проверки активности
-        self.driver.tap(*self.cfg.corruption_tab_xy)
+        self.driver.tap(self.cfg.corruption_tab_xy)
         self.sleep(0.8)
         if not self._wait_screen('dialog'):
             return self._abort("вкладка «Элитная скверна» не открылась")
 
-        self.driver.tap(*self.cfg.corruption_search_xy)
+        self.driver.tap(self.cfg.corruption_search_xy)
         self.sleep(1.6)
         if not self._wait_screen('boss_panel'):
             return self._abort("«Поиск» не дал панель босса")
 
         pos = self.vision.find_button(self.driver.screenshot(), "assault")
-        self.driver.tap(*(pos if pos is not None else self.cfg.corruption_assault_xy))
+        self.driver.tap(pos if pos is not None else self.cfg.corruption_assault_xy)
         screen = self._wait_any({'preview', 'preview_low_energy'})
         if screen is None:
             return self._abort("превью штурма не открылось")
@@ -171,6 +171,6 @@ class CorruptionActions:
         send = self.vision.find_button(self.driver.screenshot(), "start_assault")
         if send is None:
             return self._abort("кнопка «Начать Штурм» пропала")
-        self.driver.tap(*send)
+        self.driver.tap(send)
         self.sleep(1.5)
         return "dispatched"
