@@ -182,6 +182,16 @@ class Config:
         "target": (16, 16),
     })
 
+    # --- Антибот: человечные паузы ---
+    human_enabled: bool = True
+    tap_inset: float = 0.5             # доля бокса, внутри которой сэмплим точку
+    human_tap_hold: bool = False       # переменная длительность нажатия (input swipe)
+    tap_hold_ms: tuple = (40, 110)
+    delay_react: tuple = (0.25, 1.8)   # «увидел экран -> нажал», логнормаль
+    delay_settle_mult: tuple = (1.0, 1.35)   # множитель к откалиброванной паузе
+    delay_poll: tuple = (0.3, 0.5)     # интервал опроса в _wait_*
+    delay_idle_mult: tuple = (1.0, 1.4)      # множитель к паузе «все отряды заняты»
+
     def tap_box(self, name, xy):
         """Бокс для тапа по ФИКСИРОВАННОЙ координате: размер берём по имени
         кнопки из tap_sizes, для неизвестных имён — tap_size_default."""
