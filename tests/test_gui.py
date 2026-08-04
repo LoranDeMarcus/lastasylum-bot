@@ -1,7 +1,8 @@
 # tests/test_gui.py
 import time
 import threading
-from src.gui import BotController
+from config import Config
+from src.gui import BotController, apply_flask_threshold, apply_flask_count
 
 class DummyEngine:
     def __init__(self):
@@ -29,3 +30,52 @@ def test_controller_double_start_is_noop():
     ctrl.start()   # не должен падать/плодить потоки
     assert ctrl.is_running()
     ctrl.stop()
+
+# --- Поле «Мин. остаток склянок» ---
+
+def test_apply_flask_threshold_sets_value():
+    cfg = Config()
+    assert apply_flask_threshold(cfg, "120") == 120
+    assert cfg.flask_stop_threshold == 120
+
+def test_apply_flask_threshold_ignores_garbage():
+    cfg = Config()
+    before = cfg.flask_stop_threshold
+    assert apply_flask_threshold(cfg, "абв") == before
+    assert cfg.flask_stop_threshold == before
+
+def test_apply_flask_threshold_ignores_negative():
+    cfg = Config()
+    before = cfg.flask_stop_threshold
+    assert apply_flask_threshold(cfg, "-5") == before
+    assert cfg.flask_stop_threshold == before
+
+def test_apply_flask_threshold_ignores_empty():
+    cfg = Config()
+    before = cfg.flask_stop_threshold
+    assert apply_flask_threshold(cfg, "") == before
+    assert cfg.flask_stop_threshold == before
+
+def test_apply_flask_threshold_accepts_zero_and_spaces():
+    cfg = Config()
+    assert apply_flask_threshold(cfg, "  0 ") == 0
+    assert cfg.flask_stop_threshold == 0
+
+# --- Поле «Склянок сейчас» ---
+
+def test_apply_flask_count_sets_value():
+    cfg = Config()
+    assert apply_flask_count(cfg, "251") == 251
+    assert cfg.flask_count_start == 251
+
+def test_apply_flask_count_zero_means_unknown():
+    cfg = Config()
+    assert apply_flask_count(cfg, "0") == 0
+    assert cfg.flask_count_start == 0
+
+def test_apply_flask_count_ignores_garbage_and_negative():
+    cfg = Config()
+    cfg.flask_count_start = 200
+    assert apply_flask_count(cfg, "две") == 200
+    assert apply_flask_count(cfg, "-1") == 200
+    assert cfg.flask_count_start == 200

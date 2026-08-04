@@ -67,6 +67,87 @@ class Vision:
             return 'attack'
         return None
 
+    def energy_window_open(self, img):
+        """Открыто ли окно «Восстановить энергию» (по заголовку)."""
+        return self.find_button(img, "energy_window_title") is not None
+
+    def flask_row_y(self, img):
+        """Вертикальный центр строки с ФИОЛЕТОВОЙ склянкой +50 в окне энергии,
+        или None если её не видно.
+
+        Строк бывает 3 или 4: при четырёх третьей идёт зелёная склянка +10 и
+        всё ниже съезжает, поэтому фиксированная координата «Использовать»
+        промахивается. Фиолетовая всегда ПОСЛЕДНЯЯ строка — из всех совпадений
+        берём самое нижнее."""
+        tpl = self._state_tpl("flask_purple")
+        if tpl is None or img.shape[0] < tpl.shape[0] or img.shape[1] < tpl.shape[1]:
+            return None
+        res = cv2.matchTemplate(img, tpl, cv2.TM_CCOEFF_NORMED)
+        ys, _ = np.where(res >= self.cfg.template_match_threshold)
+        if len(ys) == 0:
+            return None
+        return int(ys.max() + tpl.shape[0] // 2)
+
+    def flask_use_qty(self, img, row_y):
+        """Сколько склянок ещё ВЛЕЗЕТ по энергии — число в счётчике этой строки
+        (проверено: при 8/120 стояло 2). None, если счётчика нет.
+
+        Один тап «Использовать» тратит ровно ОДНУ склянку (+50), так что это
+        число — верхний предел числа тапов, а не расход за тап."""
+        x, dy, w, h = self.cfg.flask_qty_region_rel
+        return self.reader.read(img, (x, row_y + dy, w, h),
+                                white_threshold=self.cfg.energy_white_threshold)
+
+    def read_flask_stock(self, img, row_y):
+        """Остаток склянок «В наличии: N» в строке фиолетовой склянки.
+
+        Виден ТОЛЬКО когда счётчик количества исчез — то есть когда долить
+        осталось меньше 50 энергии (обычно уже ПОСЛЕ применения склянок).
+        Пока счётчик на месте, он перекрывает это число и вернётся None."""
+        x, dy, w, h = self.cfg.flask_stock_region_rel
+        return self.reader.read(img, (x, row_y + dy, w, h))
+
+    def exit_dialog_open(self, img):
+        """Открыт ли диалог «Выйти из игры?». Он появляется от системной
+        «назад» на чистой карте — то есть ровно на пути восстановления бота
+        после неудавшегося шага. Пропустить его нельзя: следующий слепой тап
+        может подтвердить выход."""
+        return self.find_button(img, "exit_cancel") is not None
+
+    def search_dialog_open(self, img):
+        """Открыт ли диалог поиска (тот, что по лупе) — на ЛЮБОЙ его вкладке.
+
+        Два независимых признака, потому что ни один не покрывает всё:
+        - кнопка «Поиск» внизу: есть только на вкладке скверны, зато её не
+          задевают бегущие сверху баннеры объявлений;
+        - кнопки лупы/звезды в строке координат «X: … Y: …»: видны на любой
+          вкладке, но полупрозрачный баннер их подкрашивает и матч срывается
+          (замер: 1.00 без баннера, 0.61 с баннером).
+        Метка активной вкладки как якорь не годится вовсе: неактивная вкладка
+        темнее и не матчится."""
+        if self.find_button(img, "corruption_search") is not None:
+            return True
+        return self.find_button(img, "corruption_dialog") is not None
+
+    def corruption_screen(self, img):
+        """Экран режима «Элитная скверна»: 'dialog' (диалог поиска на вкладке
+        скверны — видна кнопка «Поиск»), 'boss_panel' (панель босса с «Штурм»),
+        'preview' (превью с «Начать Штурм»), 'preview_low_energy' (то же превью,
+        но энергии не хватает и кнопка заменена на «Увеличить энергию»),
+        иначе None.
+
+        Порядок проверок важен: «Начать Штурм» встречается только в превью,
+        поэтому проверяется первым; «Штурм» есть и на панели босса."""
+        if self.find_button(img, "start_assault") is not None:
+            return 'preview'
+        if self.find_button(img, "boost_energy") is not None:
+            return 'preview_low_energy'
+        if self.find_button(img, "corruption_search") is not None:
+            return 'dialog'
+        if self.find_button(img, "assault") is not None:
+            return 'boss_panel'
+        return None
+
     def on_world_map(self, img):
         """True только если это чистая отзум-карта мира: матчим легенду
         «Моя территория/…» в top-right (её нет на зум-ине/в меню/полном UI).
@@ -115,6 +196,32 @@ class Vision:
             return 'idle'
         return 'returning' if sr >= sm else 'marching'
 
+    def active_squads(self, img):
+        """Число активных отрядов из виджета «Отряд N/4» (левый верх) —
+        главный гейт режима «Элитная скверна»: N < squad_total = есть куда слать.
+
+        Виджет плавает по вертикали между кадрами (замер: 252 vs 274), поэтому
+        ищем якорь-слово «Отряд» шаблоном в полосе и читаем цифру по фикс.
+        смещению от матча. Виджета нет -> 0 (все отряды дома). Якорь есть, но
+        цифра не прочлась -> squad_total: лучше лишний раз подождать, чем
+        послать отряд вслепую."""
+        bx, by, bw, bh = self.cfg.squad_header_band
+        band = img[by:by + bh, bx:bx + bw]
+        tpl = self._state_tpl("squad_header")
+        if tpl is None or band.shape[0] < tpl.shape[0] or band.shape[1] < tpl.shape[1]:
+            return 0
+        _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(band, tpl, cv2.TM_CCOEFF_NORMED))
+        if score < self.cfg.squad_header_threshold:
+            return 0
+        mx, my = bx + loc[0], by + loc[1]
+        dx, dy, w, h = self.cfg.squad_count_offset
+        n = self.reader.read(img, (mx + dx, my + dy, w, h))
+        # 0 — валидное значение: виджет может висеть с «Отряд 0/4», когда все
+        # отряды дома (а может и вовсе отсутствовать — оба состояния бывают).
+        if n is None or not (0 <= n <= self.cfg.squad_total):
+            return self.cfg.squad_total
+        return n
+
     def _match_state(self, crop, name):
         tpl = self._state_tpl(name)
         if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
@@ -143,7 +250,11 @@ class Vision:
         return (maxloc[0] + tw // 2, maxloc[1] + th // 2)
 
     def read_energy(self, img):
-        return self.reader.read(img, self.cfg.region_energy)
+        """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,
+        поэтому читаем с отсечкой по яркости, а не через Otsu (иначе полоса
+        склеивается с цифрами: 50 читалось как 9)."""
+        return self.reader.read(img, self.cfg.region_energy,
+                                white_threshold=self.cfg.energy_white_threshold)
 
     def read_deployed(self, img):
         return self.reader.read(img, self.cfg.region_deployed)

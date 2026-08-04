@@ -47,11 +47,14 @@ class FakeDriver:
         self.zoom_outs += 1
 
 class FakeVision:
-    def __init__(self, energy=130, targets=None, squad='idle', on_map=True):
+    def __init__(self, energy=130, targets=None, squad='idle', on_map=True, active=0):
         self._energy = energy
         self._targets = targets if targets is not None else []
         self._squad = squad
         self._on_map = on_map
+        self._active = active          # «Отряд N/4» для режима скверны
+    def active_squads(self, img):
+        return self._active
     def on_world_map(self, img):
         return self._on_map
     def read_energy(self, img):
@@ -63,8 +66,9 @@ class FakeVision:
 
 def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
                dry_run=False, driver=None, on_map=True):
-    # старые тесты проверяют map-based путь -> отключаем search-стратегию
-    cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run, use_search_strategy=False)
+    # старые тесты проверяют map-based путь -> отключаем и search, и скверну
+    cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run,
+                 use_search_strategy=False, strategy="map")
     eng = BotEngine(driver=driver or FakeDriver(),
                     vision=FakeVision(energy, targets, squad, on_map),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
@@ -72,12 +76,143 @@ def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
     return eng
 
 def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=None):
-    cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True)
+    cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True, strategy="thief")
     eng = BotEngine(driver=FakeDriver(),
                     vision=FakeVision(energy=energy, targets=targets, squad=squad),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
     eng.flasks = flasks
     return eng
+
+# --- Режим «Элитная скверна» ---
+
+class FakeCorruption:
+    def __init__(self, results=(), spend=0, stock=None):
+        self.results = list(results)
+        self.calls = []
+        self.flasks_used = 0
+        self.last_flask_stock = None
+        self._spend = spend          # сколько склянок «тратит» каждый заход
+        self._stock = stock          # что «прочитано» в «В наличии: N»
+    def run_once(self, refill=False):
+        self.calls.append(refill)
+        if refill:
+            self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+                self._stock -= self._spend
+        return self.results.pop(0) if self.results else "dispatched"
+
+def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251):
+    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption")
+    eng = BotEngine(driver=FakeDriver(), vision=FakeVision(energy=energy, active=active),
+                    actions=FakeActions(), cfg=cfg, log=lambda m: None,
+                    sleep=lambda s: None, corruption=corruption)
+    eng.flasks = flasks
+    return eng
+
+def test_corruption_dispatches_when_squad_free():
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, active=1)
+    assert eng.one_iteration().type == "assault_boss"
+    assert corr.calls == [True]              # склянок 251 > порога -> рефилл разрешён
+
+def test_corruption_waits_when_all_squads_busy():
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr, active=4)
+    assert eng.one_iteration() is None
+    assert corr.calls == []                  # ни одного захода
+
+def test_corruption_dispatches_on_last_free_slot():
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, active=3)
+    assert eng.one_iteration().type == "assault_boss"
+
+def test_corruption_forbids_refill_at_or_below_threshold():
+    """Порог из GUI: на нём и ниже склянки не тратим, но фармить продолжаем,
+    пока хватает энергии."""
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, flasks=180)     # ровно порог
+    assert eng.one_iteration().type == "assault_boss"
+    assert corr.calls == [False]
+
+def test_corruption_allows_refill_above_threshold():
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, flasks=181)
+    eng.one_iteration()
+    assert corr.calls == [True]
+
+def test_corruption_allows_probe_refill_when_stock_unknown():
+    """«В наличии: N» читается только ПОСЛЕ применения, поэтому первый рефилл
+    разрешён вслепую — он же и выясняет реальный остаток."""
+    corr = FakeCorruption(["dispatched"], spend=2, stock=273)
+    eng = _mk_corruption_engine(corr)
+    eng.flasks = None
+    eng.one_iteration()
+    assert corr.calls == [True]
+    assert eng.flasks == 273           # остаток стал известен
+
+def test_corruption_prefers_read_stock_over_local_count():
+    corr = FakeCorruption(["dispatched"], spend=2, stock=273)
+    eng = _mk_corruption_engine(corr, flasks=500)   # учёт был неверным
+    eng.one_iteration()
+    assert eng.flasks == 273                        # верим прочитанному
+
+def test_corruption_subtracts_spent_when_stock_unreadable():
+    corr = FakeCorruption(["dispatched"], spend=2)
+    eng = _mk_corruption_engine(corr, flasks=200)
+    eng.one_iteration()
+    assert eng.flasks == 198
+
+def test_corruption_stops_spending_once_threshold_reached():
+    corr = FakeCorruption(["dispatched", "dispatched"], spend=2)
+    eng = _mk_corruption_engine(corr, flasks=182)
+    eng.one_iteration()                      # 182 -> 180
+    assert eng.flasks == 180
+    eng.one_iteration()                      # на пороге -> больше не тратим
+    assert corr.calls == [True, False]
+
+def test_corruption_stops_immediately_on_low_energy_verdict():
+    """Превью сказало «энергии мало» — это источник истины, стопимся сразу,
+    не дожидаясь трёх провалов."""
+    corr = FakeCorruption(["low_energy"])
+    eng = _mk_corruption_engine(corr, energy=80)   # HUD мог прочитаться неверно
+    assert eng.one_iteration().type == "stop"
+
+def test_corruption_stops_after_max_failures():
+    corr = FakeCorruption(["failed"] * 5)
+    eng = _mk_corruption_engine(corr)
+    last = None
+    for _ in range(eng.cfg.max_search_failures):
+        last = eng.one_iteration()
+    assert last.type == "stop"
+
+def test_corruption_failure_counter_resets_on_success():
+    corr = FakeCorruption(["failed", "dispatched", "failed", "failed"])
+    eng = _mk_corruption_engine(corr)
+    for _ in range(4):
+        action = eng.one_iteration()
+    assert action.type == "assault_boss"     # 3 подряд не набралось -> не стоп
+
+def test_corruption_dry_run_does_not_act():
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr)
+    eng.cfg.dry_run = True
+    assert eng.one_iteration().type == "assault_boss"
+    assert corr.calls == []
+
+def test_corruption_start_takes_flask_stock_from_config():
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr)
+    eng.cfg.flask_count_start = 240
+    eng.start()
+    assert eng.flasks == 240
+
+def test_corruption_start_treats_zero_stock_as_unknown():
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr)
+    eng.cfg.flask_count_start = 0
+    eng.start()
+    assert eng.flasks is None                # неизвестно -> порог не ограничивает
 
 def test_search_strategy_searches_when_idle():
     act = FakeActions()
@@ -318,7 +453,7 @@ def test_read_state_handles_none_energy():
 def test_start_reads_flask_count():
     act = FakeActions(); act._flasks = 200
     eng = BotEngine(driver=None, vision=None, actions=act,
-                    cfg=Config(use_search_strategy=False),
+                    cfg=Config(use_search_strategy=False, strategy="map"),
                     log=lambda m: None, sleep=lambda s: None)
     eng.start()
     assert eng.flasks == 200
@@ -339,7 +474,7 @@ def test_run_returns_error_on_start_exception():
             raise NotImplementedError("no OCR")
     logs = []
     eng = BotEngine(driver=None, vision=None, actions=BoomActions(),
-                    cfg=Config(use_search_strategy=False),
+                    cfg=Config(use_search_strategy=False, strategy="map"),
                     log=logs.append, sleep=lambda s: None)
     reason = eng.run(threading.Event())
     assert reason == 'error'

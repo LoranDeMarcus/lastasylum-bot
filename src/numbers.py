@@ -5,12 +5,12 @@ import cv2
 import numpy as np
 
 class NumberReader(Protocol):
-    def read(self, img, region) -> Optional[int]: ...
+    def read(self, img, region, white_threshold=None) -> Optional[int]: ...
 
 class FixedReader:
     def __init__(self, value):
         self.value = value
-    def read(self, img, region):
+    def read(self, img, region, white_threshold=None):
         return self.value
 
 class TesseractReader:
@@ -39,7 +39,15 @@ class TemplateReader:
         self.min_match = min_match
         self._templates = None
 
-    def _binarize(self, gray):
+    def _binarize(self, gray, white_threshold=None):
+        """Otsu с авто-инверсией — для регионов с двумя тонами (текст/фон).
+
+        white_threshold задаётся там, где фон трёхтоновый и Otsu ломается:
+        энергия написана белым ПОВЕРХ зелёной полосы на тёмной подложке, и
+        Otsu склеивает полосу с цифрами (читалось 9 вместо 50). Отсечка по
+        яркости берёт только белое."""
+        if white_threshold is not None:
+            return (gray > white_threshold).astype(np.uint8) * 255
         _, b = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         if b.mean() > 127:          # цифры должны быть меньшинством (белые на чёрном)
             b = cv2.bitwise_not(b)
@@ -83,7 +91,7 @@ class TemplateReader:
         res = cv2.matchTemplate(a, b, cv2.TM_CCOEFF_NORMED)
         return float(res.max())
 
-    def read(self, img, region):
+    def read(self, img, region, white_threshold=None):
         x, y, w, h = region
         if w <= 0 or h <= 0:
             return None
@@ -91,7 +99,7 @@ class TemplateReader:
         if crop.size == 0:
             return None
         gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
-        b = self._binarize(gray)
+        b = self._binarize(gray, white_threshold)
         contours, _ = cv2.findContours(b, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = [cv2.boundingRect(c) for c in contours]
         boxes = [bb for bb in boxes if bb[3] >= 0.4 * h and bb[2] >= 2]
