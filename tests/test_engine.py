@@ -163,6 +163,13 @@ def test_corruption_skips_energy_window_while_energy_is_enough():
     eng.one_iteration()
     assert corr.calls == [(False, False)]
 
+def test_corruption_stops_immediately_on_low_energy_verdict():
+    """Превью сказало «энергии мало» — это источник истины, стопимся сразу,
+    не дожидаясь трёх провалов."""
+    corr = FakeCorruption(["low_energy"])
+    eng = _mk_corruption_engine(corr, energy=80)   # HUD мог прочитаться неверно
+    assert eng.one_iteration().type == "stop"
+
 def test_corruption_stops_after_max_failures():
     corr = FakeCorruption(["failed"] * 5)
     eng = _mk_corruption_engine(corr)

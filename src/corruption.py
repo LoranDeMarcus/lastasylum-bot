@@ -20,13 +20,18 @@ class CorruptionActions:
         self.sleep = sleep
         self.last_flasks = None       # последнее прочитанное «В наличии: N»
 
-    def _wait_screen(self, want, timeout_s=None):
+    def _wait_any(self, wanted, timeout_s=None):
+        """Ждём любой из перечисленных экранов; возвращаем какой дождались."""
         t = self.cfg.panel_verify_timeout_s if timeout_s is None else timeout_s
         for _ in range(max(1, int(t / 0.3))):
-            if self.vision.corruption_screen(self.driver.screenshot()) == want:
-                return True
+            screen = self.vision.corruption_screen(self.driver.screenshot())
+            if screen in wanted:
+                return screen
             self.sleep(0.3)
-        return False
+        return None
+
+    def _wait_screen(self, want, timeout_s=None):
+        return self._wait_any({want}, timeout_s) == want
 
     def _wait_dialog(self):
         """Диалог поиска выезжает анимацией — одиночной проверки мало."""
@@ -91,8 +96,17 @@ class CorruptionActions:
 
         pos = self.vision.find_button(self.driver.screenshot(), "assault")
         self.driver.tap(*(pos if pos is not None else self.cfg.corruption_assault_xy))
-        if not self._wait_screen('preview'):
+        screen = self._wait_any({'preview', 'preview_low_energy'})
+        if screen is None:
             return self._abort("превью штурма не открылось")
+        if screen == 'preview_low_energy':
+            # Энергии меньше стоимости штурма: игра подменяет «Начать Штурм»
+            # на «Увеличить энергию». Отправить нечем — выходим чисто, без
+            # тапов по окну энергии (его вёрстка плавает, см. спеку).
+            self.log("  энергии не хватает на штурм (кнопка «Увеличить энергию»)")
+            self.actions.close_preview()
+            self.sleep(0.6)
+            return "low_energy"
 
         # Гейт победы по умолчанию выключен: уровень скверны фиксирует человек,
         # значит босс заведомо проходим (см. спеку).

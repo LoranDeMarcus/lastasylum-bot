@@ -184,6 +184,24 @@ def test_last_flasks_none_when_energy_window_failed():
     assert res == "dispatched"
     assert c.last_flasks is None
 
+def test_run_once_reports_low_energy_and_closes_preview():
+    """Энергии меньше стоимости -> игра подменяет «Начать Штурм» на «Увеличить
+    энергию». Выходим чисто, без тапов по окну энергии."""
+    drv = FakeDriver(["dlg", "dlg", "panel", "panel", "lowe"])
+    vis = FakeVision(
+        screen_by_frame={"dlg": "dialog", "panel": "boss_panel",
+                         "lowe": "preview_low_energy"},
+        buttons_by_frame={"panel": {"assault": ASSAULT_MATCH}},
+        dialog_frames={"dlg"},
+    )
+    acts = FakeActions()
+    _, res = _run(drv, vis, acts)
+    assert res == "low_energy"
+    assert acts.closed == 1                  # превью закрыто
+    assert acts.refilled == 0 and acts.reads == 0
+    assert SEND_MATCH not in drv.taps
+    assert drv.backs == 0                    # BACK не нужен, вышли штатно
+
 def test_run_once_aborts_if_preview_gone_after_energy_window():
     """Окно энергии не закрылось -> «Начать Штурм» недоступен: отменяем заход,
     а не тапаем вслепую по чужому окну."""

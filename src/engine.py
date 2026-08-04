@@ -169,6 +169,11 @@ class BotEngine:
         if self.corruption.last_flasks is not None:
             self.flasks = self.corruption.last_flasks
 
+        if res == 'low_energy':
+            # Превью — источник истины: игра сама сказала, что энергии мало.
+            self.log("Энергии не хватает на штурм — стоп. Пополни энергию и запусти снова.")
+            return Action('stop')
+
         if res == 'dispatched':
             self._no_progress = 0
             after = self.vision.active_squads(self.driver.screenshot())

@@ -158,6 +158,23 @@ def test_corruption_screen_detects_preview_with_busy_squad():
     v = Vision(cfg, TemplateReader(cfg))
     assert v.corruption_screen(_ref("17_corruption_preview_squad1_busy.png")) == "preview"
 
+def test_corruption_screen_detects_low_energy_preview():
+    """При нехватке энергии «Начать Штурм» подменяется на «Увеличить энергию» —
+    без этого превью не опознавалось и бот крутил провальные заходы."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("26_preview_low_energy.png")) == "preview_low_energy"
+
+def test_corruption_screen_normal_preview_not_low_energy():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("25_corruption_preview_energy52.png")) == "preview"
+
+def test_corruption_screen_none_on_energy_window():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("27_energy_window_3rows.png")) is None
+
 def test_corruption_screen_none_on_map():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))

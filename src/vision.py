@@ -92,12 +92,16 @@ class Vision:
     def corruption_screen(self, img):
         """Экран режима «Элитная скверна»: 'dialog' (диалог поиска на вкладке
         скверны — видна кнопка «Поиск»), 'boss_panel' (панель босса с «Штурм»),
-        'preview' (превью с «Начать Штурм»), иначе None.
+        'preview' (превью с «Начать Штурм»), 'preview_low_energy' (то же превью,
+        но энергии не хватает и кнопка заменена на «Увеличить энергию»),
+        иначе None.
 
         Порядок проверок важен: «Начать Штурм» встречается только в превью,
         поэтому проверяется первым; «Штурм» есть и на панели босса."""
         if self.find_button(img, "start_assault") is not None:
             return 'preview'
+        if self.find_button(img, "boost_energy") is not None:
+            return 'preview_low_energy'
         if self.find_button(img, "corruption_search") is not None:
             return 'dialog'
         if self.find_button(img, "assault") is not None:
