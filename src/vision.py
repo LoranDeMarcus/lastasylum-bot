@@ -115,6 +115,30 @@ class Vision:
             return 'idle'
         return 'returning' if sr >= sm else 'marching'
 
+    def active_squads(self, img):
+        """Число активных отрядов из виджета «Отряд N/4» (левый верх) —
+        главный гейт режима «Элитная скверна»: N < squad_total = есть куда слать.
+
+        Виджет плавает по вертикали между кадрами (замер: 252 vs 274), поэтому
+        ищем якорь-слово «Отряд» шаблоном в полосе и читаем цифру по фикс.
+        смещению от матча. Виджета нет -> 0 (все отряды дома). Якорь есть, но
+        цифра не прочлась -> squad_total: лучше лишний раз подождать, чем
+        послать отряд вслепую."""
+        bx, by, bw, bh = self.cfg.squad_header_band
+        band = img[by:by + bh, bx:bx + bw]
+        tpl = self._state_tpl("squad_header")
+        if tpl is None or band.shape[0] < tpl.shape[0] or band.shape[1] < tpl.shape[1]:
+            return 0
+        _, score, _, loc = cv2.minMaxLoc(cv2.matchTemplate(band, tpl, cv2.TM_CCOEFF_NORMED))
+        if score < self.cfg.squad_header_threshold:
+            return 0
+        mx, my = bx + loc[0], by + loc[1]
+        dx, dy, w, h = self.cfg.squad_count_offset
+        n = self.reader.read(img, (mx + dx, my + dy, w, h))
+        if n is None or not (1 <= n <= self.cfg.squad_total):
+            return self.cfg.squad_total
+        return n
+
     def _match_state(self, crop, name):
         tpl = self._state_tpl(name)
         if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:

@@ -1,7 +1,8 @@
+import os
 import numpy as np
 import cv2
 from config import Config
-from src.numbers import FixedReader
+from src.numbers import FixedReader, TemplateReader
 from src.vision import Vision
 
 ORANGE = (0, 180, 255)   # BGR -> HSV H≈21, попадает в маску целей (14..28)
@@ -74,3 +75,29 @@ def test_on_world_map_false_on_blank():
     v = Vision(cfg, FixedReader(5))
     blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)  # нет легенды карты
     assert v.on_world_map(blank) is False
+
+# --- Режим «Элитная скверна»: счётчик активных отрядов «Отряд N/4» ---
+
+def _ref(name):
+    return cv2.imread(os.path.join("reference", name))
+
+def test_active_squads_reads_one_from_widget():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.active_squads(_ref("16_widget_assault_1of4.png")) == 1
+
+def test_active_squads_reads_one_when_widget_shifted():
+    # на этом кадре виджет на 22px ниже -> фикс. регион бы промахнулся
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.active_squads(_ref("18_widget_returning_1of4.png")) == 1
+
+def test_active_squads_zero_without_widget():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.active_squads(_ref("11_corruption_map_idle.png")) == 0
+
+def test_active_squads_zero_on_preview():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.active_squads(_ref("15_corruption_preview_all_idle.png")) == 0
