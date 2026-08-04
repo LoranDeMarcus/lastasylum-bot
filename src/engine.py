@@ -13,13 +13,15 @@ class BotEngine:
     dry_run (cfg.dry_run): читаем экран и ЛОГИРУЕМ решение, но НЕ тапаем —
     для проверки детекции/логики на живой игре без действий."""
 
-    def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep):
+    def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
+                 corruption=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
+        self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
@@ -29,6 +31,10 @@ class BotEngine:
         if self.cfg.dry_run:
             self.flasks = 10 ** 9        # в dry-run не открываем энергоокно
             self.log("Старт (DRY-RUN: тапов не будет).")
+        elif self.cfg.strategy == "corruption":
+            # окно энергии открывается только с превью -> склянки прочитаем там
+            self.flasks = None
+            self.log("Старт («Элитная скверна»). Склянки прочитаем на первом превью.")
         elif self.cfg.use_search_strategy:
             # окно энергии открывается только с превью отправки; с карты «+»
             # тапнет кнопку дома -> склянки прочитаем на первом же превью
@@ -123,7 +129,59 @@ class BotEngine:
                 return Action('stop')
         return Action('attack_mob')
 
+    def _corruption_iteration(self):
+        """Режим «Элитная скверна»: гейт по числу активных отрядов «Отряд N/4»,
+        отправка штурма пока есть свободные слоты. Все отряды в походе -> ждём;
+        энергии не хватает и склянки тратить нельзя -> стоп.
+
+        Тапа по карте нет (панель босса открывает сам «Поиск»), поэтому guard
+        вида и авто-отзум тут не нужны."""
+        img = self.driver.screenshot()
+        active = self.vision.active_squads(img)
+        if active >= self.cfg.squad_total:
+            self.log(f"Все отряды заняты ({active}/{self.cfg.squad_total}), ждём.")
+            self.sleep(self.cfg.corruption_poll_interval_s)
+            return None
+
+        energy = self.vision.read_energy(img)
+        refill = energy is not None and energy < self.cfg.corruption_energy_cost
+        want_flasks = self.flasks is None
+        if refill and want_flasks:
+            # сколько склянок — ещё не знаем; сначала прочитаем, не тратя
+            refill = False
+        elif refill and self.flasks < self.cfg.flask_stop_threshold:
+            self.log(f"Энергии {energy}, склянок {self.flasks} < "
+                     f"{self.cfg.flask_stop_threshold} — стоп.")
+            return Action('stop')
+
+        self.log(f"[отрядов={active}/{self.cfg.squad_total}] энергия={energy} "
+                 f"склянок={self.flasks}" + (" (+рефилл склянкой)" if refill else "")
+                 + " -> штурм скверны")
+        if self.cfg.dry_run:
+            self.sleep(1.0)
+            return Action('assault_boss')
+
+        res = self.corruption.run_once(refill=refill, want_flasks=want_flasks)
+        self.log(f"  Штурм скверны -> {res}")
+        if self.corruption.last_flasks is not None:
+            self.flasks = self.corruption.last_flasks
+
+        if res == 'dispatched':
+            self._no_progress = 0
+            after = self.vision.active_squads(self.driver.screenshot())
+            if after <= active:
+                self.log(f"  внимание: отрядов было {active}, стало {after} — "
+                         f"отправка могла не пройти")
+        else:
+            self._no_progress += 1
+            if self._no_progress >= self.cfg.max_search_failures:
+                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+                return Action('stop')
+        return Action('assault_boss')
+
     def one_iteration(self):
+        if self.cfg.strategy == "corruption":
+            return self._corruption_iteration()
         if self.cfg.use_search_strategy:
             return self._search_iteration()
 
