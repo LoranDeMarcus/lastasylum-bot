@@ -67,6 +67,28 @@ class Vision:
             return 'attack'
         return None
 
+    def search_dialog_open(self, img):
+        """Открыт ли диалог поиска (тот, что по лупе) — на ЛЮБОЙ его вкладке.
+        Якорь — статичные кнопки лупы и звезды в строке перехода по координатам
+        «X: … Y: …»; сами числа в шаблон не попадают. Метка активной вкладки для
+        этого не годится: неактивная вкладка темнее и не матчится."""
+        return self.find_button(img, "corruption_dialog") is not None
+
+    def corruption_screen(self, img):
+        """Экран режима «Элитная скверна»: 'dialog' (диалог поиска на вкладке
+        скверны — видна кнопка «Поиск»), 'boss_panel' (панель босса с «Штурм»),
+        'preview' (превью с «Начать Штурм»), иначе None.
+
+        Порядок проверок важен: «Начать Штурм» встречается только в превью,
+        поэтому проверяется первым; «Штурм» есть и на панели босса."""
+        if self.find_button(img, "start_assault") is not None:
+            return 'preview'
+        if self.find_button(img, "corruption_search") is not None:
+            return 'dialog'
+        if self.find_button(img, "assault") is not None:
+            return 'boss_panel'
+        return None
+
     def on_world_map(self, img):
         """True только если это чистая отзум-карта мира: матчим легенду
         «Моя территория/…» в top-right (её нет на зум-ине/в меню/полном UI).

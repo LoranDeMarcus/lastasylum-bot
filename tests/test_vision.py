@@ -101,3 +101,46 @@ def test_active_squads_zero_on_preview():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))
     assert v.active_squads(_ref("15_corruption_preview_all_idle.png")) == 0
+
+# --- Режим «Элитная скверна»: распознавание экранов ---
+
+def test_corruption_screen_detects_dialog():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("13_corruption_dialog.png")) == "dialog"
+
+def test_corruption_screen_detects_boss_panel():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("14_corruption_boss_panel.png")) == "boss_panel"
+
+def test_corruption_screen_detects_preview():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("15_corruption_preview_all_idle.png")) == "preview"
+
+def test_corruption_screen_detects_preview_with_busy_squad():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("17_corruption_preview_squad1_busy.png")) == "preview"
+
+def test_corruption_screen_none_on_map():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("11_corruption_map_idle.png")) is None
+
+def test_corruption_screen_none_on_wrong_event_dialog():
+    # кнопка «Особое событие» открывает ДРУГОЙ диалог — режим не должен его принять
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("12_event_dialog_WRONG.png")) is None
+
+def test_search_dialog_open_true_on_dialog():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.search_dialog_open(_ref("13_corruption_dialog.png")) is True
+
+def test_search_dialog_open_false_on_wrong_event_dialog():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.search_dialog_open(_ref("12_event_dialog_WRONG.png")) is False
