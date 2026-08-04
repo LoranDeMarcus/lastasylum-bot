@@ -28,12 +28,24 @@ class CorruptionActions:
             self.sleep(0.3)
         return False
 
+    def _safe_back(self):
+        """Системная «назад» + страховка. На ЧИСТОЙ карте «назад» открывает
+        «Выйти из игры?» — если это проглядеть, следующий слепой тап может
+        подтвердить выход. Поэтому сразу проверяем и жмём «Отмена»."""
+        self.driver.back()
+        self.sleep(0.6)
+        img = self.driver.screenshot()
+        if self.vision.exit_dialog_open(img):
+            pos = self.vision.find_button(img, "exit_cancel")
+            self.log("  открылся диалог выхода из игры -> Отмена")
+            self.driver.tap(*(pos if pos is not None else self.cfg.exit_cancel_xy))
+            self.sleep(0.6)
+
     def _abort(self, why):
         """Шаг не подтвердился: закрываем то, что открылось, чтобы следующая
         итерация не тапала вслепую по чужому меню."""
         self.log(f"  {why} -> BACK")
-        self.driver.back()
-        self.sleep(0.6)
+        self._safe_back()
         return "failed"
 
     def _side_trip(self, refill, want_flasks):

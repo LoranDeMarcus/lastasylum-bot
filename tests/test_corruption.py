@@ -19,15 +19,18 @@ class FakeDriver:
 
 class FakeVision:
     def __init__(self, screen_by_frame, buttons_by_frame=None,
-                 win_by_frame=None, dialog_frames=()):
+                 win_by_frame=None, dialog_frames=(), exit_frames=()):
         self.screen_by_frame = screen_by_frame
         self.buttons_by_frame = buttons_by_frame or {}
         self.win_by_frame = win_by_frame or {}
         self.dialog_frames = set(dialog_frames)
+        self.exit_frames = set(exit_frames)
     def corruption_screen(self, img):
         return self.screen_by_frame.get(img)
     def search_dialog_open(self, img):
         return img in self.dialog_frames
+    def exit_dialog_open(self, img):
+        return img in self.exit_frames
     def find_button(self, img, name):
         return self.buttons_by_frame.get(img, {}).get(name)
     def win_prediction(self, img):
@@ -182,6 +185,30 @@ def test_verdict_gate_on_skips_unwinnable():
     assert res == "skip_unwinnable"
     assert acts.closed == 1
     assert SEND_MATCH not in drv.taps     # «Начать Штурм» не нажимали
+
+def test_abort_cancels_exit_game_dialog_opened_by_back():
+    """«Назад» на чистой карте открывает «Выйти из игры?» — бот обязан нажать
+    «Отмена», иначе следующий слепой тап может закрыть игру."""
+    cfg = Config()
+    drv = FakeDriver(["map", "exit"])
+    vis = FakeVision(
+        screen_by_frame={},
+        buttons_by_frame={"exit": {"exit_cancel": (297, 1030)}},
+        dialog_frames=set(),
+        exit_frames={"exit"},
+    )
+    _, res = _run(drv, vis, FakeActions(), cfg)
+    assert res == "failed"
+    assert drv.backs == 1
+    assert (297, 1030) in drv.taps            # «Отмена» нажата
+
+def test_abort_does_not_tap_when_no_exit_dialog():
+    cfg = Config()
+    drv = FakeDriver(["map", "map"])
+    vis = FakeVision(screen_by_frame={}, dialog_frames=set(), exit_frames=set())
+    _, res = _run(drv, vis, FakeActions(), cfg)
+    assert res == "failed"
+    assert cfg.exit_cancel_xy not in drv.taps
 
 def test_verdict_gate_on_dispatches_on_win():
     cfg = Config()

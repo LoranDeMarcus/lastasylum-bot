@@ -102,6 +102,27 @@ def test_active_squads_zero_on_preview():
     v = Vision(cfg, TemplateReader(cfg))
     assert v.active_squads(_ref("15_corruption_preview_all_idle.png")) == 0
 
+def test_active_squads_reads_explicit_zero_widget():
+    """Виджет не всегда исчезает при свободных отрядах — бывает «Отряд 0/4».
+    Ноль обязан читаться как ноль, иначе бот решит, что слать некуда."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.active_squads(_ref("19_widget_0of4_energy50.png")) == 0
+
+# --- Чтение энергии (белые цифры поверх зелёной полосы) ---
+
+def test_read_energy_over_partially_filled_bar():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.read_energy(_ref("19_widget_0of4_energy50.png")) == 50
+
+def test_read_energy_various_levels():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.read_energy(_ref("11_corruption_map_idle.png")) == 81
+    assert v.read_energy(_ref("16_widget_assault_1of4.png")) == 62
+    assert v.read_energy(_ref("20_map_energy42.png")) == 42
+
 # --- Режим «Элитная скверна»: распознавание экранов ---
 
 def test_corruption_screen_detects_dialog():
@@ -144,3 +165,15 @@ def test_search_dialog_open_false_on_wrong_event_dialog():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))
     assert v.search_dialog_open(_ref("12_event_dialog_WRONG.png")) is False
+
+def test_exit_dialog_open_true_on_exit_prompt():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.exit_dialog_open(_ref("22_exit_game_dialog.png")) is True
+
+def test_exit_dialog_open_false_on_map_and_other_dialogs():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.exit_dialog_open(_ref("11_corruption_map_idle.png")) is False
+    assert v.exit_dialog_open(_ref("13_corruption_dialog.png")) is False
+    assert v.exit_dialog_open(_ref("21_network_lost_dialog.png")) is False

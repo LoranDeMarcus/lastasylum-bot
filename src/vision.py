@@ -67,6 +67,13 @@ class Vision:
             return 'attack'
         return None
 
+    def exit_dialog_open(self, img):
+        """Открыт ли диалог «Выйти из игры?». Он появляется от системной
+        «назад» на чистой карте — то есть ровно на пути восстановления бота
+        после неудавшегося шага. Пропустить его нельзя: следующий слепой тап
+        может подтвердить выход."""
+        return self.find_button(img, "exit_cancel") is not None
+
     def search_dialog_open(self, img):
         """Открыт ли диалог поиска (тот, что по лупе) — на ЛЮБОЙ его вкладке.
         Якорь — статичные кнопки лупы и звезды в строке перехода по координатам
@@ -157,7 +164,9 @@ class Vision:
         mx, my = bx + loc[0], by + loc[1]
         dx, dy, w, h = self.cfg.squad_count_offset
         n = self.reader.read(img, (mx + dx, my + dy, w, h))
-        if n is None or not (1 <= n <= self.cfg.squad_total):
+        # 0 — валидное значение: виджет может висеть с «Отряд 0/4», когда все
+        # отряды дома (а может и вовсе отсутствовать — оба состояния бывают).
+        if n is None or not (0 <= n <= self.cfg.squad_total):
             return self.cfg.squad_total
         return n
 
@@ -189,7 +198,11 @@ class Vision:
         return (maxloc[0] + tw // 2, maxloc[1] + th // 2)
 
     def read_energy(self, img):
-        return self.reader.read(img, self.cfg.region_energy)
+        """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,
+        поэтому читаем с отсечкой по яркости, а не через Otsu (иначе полоса
+        склеивается с цифрами: 50 читалось как 9)."""
+        return self.reader.read(img, self.cfg.region_energy,
+                                white_threshold=self.cfg.energy_white_threshold)
 
     def read_deployed(self, img):
         return self.reader.read(img, self.cfg.region_deployed)
