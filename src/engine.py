@@ -145,8 +145,11 @@ class BotEngine:
 
         energy = self.vision.read_energy(img)
         refill = energy is not None and energy < self.cfg.corruption_energy_cost
-        want_flasks = self.flasks is None
-        if refill and want_flasks:
+        # Склянки нужны ТОЛЬКО для рефилла, поэтому в окно энергии не ходим,
+        # пока энергии хватает: лишний заход перекрывает превью и лишь
+        # добавляет шансов сорвать отправку.
+        want_flasks = refill and self.flasks is None
+        if want_flasks:
             # сколько склянок — ещё не знаем; сначала прочитаем, не тратя
             refill = False
         elif refill and self.flasks < self.cfg.flask_stop_threshold:

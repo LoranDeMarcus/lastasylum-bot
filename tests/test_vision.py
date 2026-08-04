@@ -102,6 +102,12 @@ def test_active_squads_zero_on_preview():
     v = Vision(cfg, TemplateReader(cfg))
     assert v.active_squads(_ref("15_corruption_preview_all_idle.png")) == 0
 
+def test_active_squads_reads_two():
+    """N>=2 — снято живьём при двух отрядах в штурме (карусель из двух строк)."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.active_squads(_ref("24_widget_2of4.png")) == 2
+
 def test_active_squads_reads_explicit_zero_widget():
     """Виджет не всегда исчезает при свободных отрядах — бывает «Отряд 0/4».
     Ноль обязан читаться как ноль, иначе бот решит, что слать некуда."""
@@ -122,6 +128,13 @@ def test_read_energy_various_levels():
     assert v.read_energy(_ref("11_corruption_map_idle.png")) == 81
     assert v.read_energy(_ref("16_widget_assault_1of4.png")) == 62
     assert v.read_energy(_ref("20_map_energy42.png")) == 42
+
+def test_read_energy_on_dispatch_preview():
+    """На превью энергия своя («52/120» справа-внизу), а HUD карты перекрыт —
+    read_energy читает именно HUD, поэтому тут ожидаем None, а не мусор."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.read_energy(_ref("25_corruption_preview_energy52.png")) is None
 
 # --- Режим «Элитная скверна»: распознавание экранов ---
 
@@ -165,6 +178,24 @@ def test_search_dialog_open_false_on_wrong_event_dialog():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))
     assert v.search_dialog_open(_ref("12_event_dialog_WRONG.png")) is False
+
+def test_search_dialog_open_survives_announcement_banner():
+    """Бегущий сверху баннер объявления подкрашивает кнопки строки координат
+    и срывает верхний якорь — распознавание держится на кнопке «Поиск»."""
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.search_dialog_open(_ref("23_corruption_dialog_banner.png")) is True
+
+def test_corruption_screen_dialog_under_banner():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.corruption_screen(_ref("23_corruption_dialog_banner.png")) == "dialog"
+
+def test_search_dialog_open_false_on_map():
+    cfg = Config()
+    v = Vision(cfg, TemplateReader(cfg))
+    assert v.search_dialog_open(_ref("11_corruption_map_idle.png")) is False
+    assert v.search_dialog_open(_ref("20_map_energy42.png")) is False
 
 def test_exit_dialog_open_true_on_exit_prompt():
     cfg = Config()

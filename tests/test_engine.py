@@ -149,9 +149,19 @@ def test_corruption_reads_flasks_first_time_instead_of_spending():
 def test_corruption_updates_flask_memory_from_side_trip():
     corr = FakeCorruption(["dispatched"])
     corr.last_flasks = 240
-    eng = _mk_corruption_engine(corr)
+    eng = _mk_corruption_engine(corr, energy=15)
+    eng.flasks = None
     eng.one_iteration()
     assert eng.flasks == 240
+
+def test_corruption_skips_energy_window_while_energy_is_enough():
+    """Склянки нужны только под рефилл: пока энергии хватает, в окно энергии
+    не ходим — лишний заход перекрывает превью и рискует сорвать отправку."""
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, energy=80)
+    eng.flasks = None
+    eng.one_iteration()
+    assert corr.calls == [(False, False)]
 
 def test_corruption_stops_after_max_failures():
     corr = FakeCorruption(["failed"] * 5)

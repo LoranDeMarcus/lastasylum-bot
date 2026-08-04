@@ -142,15 +142,29 @@ def test_run_once_uses_fixed_coords_when_assault_button_not_matched():
     assert cfg.corruption_assault_xy in drv.taps
     assert ASSAULT_MATCH not in drv.taps
 
+def _happy_with_energy_trip():
+    """Как _happy, но с запасом кадров превью: после окна энергии бот ждёт,
+    пока превью вернётся, и только потом ищет «Начать Штурм»."""
+    drv = FakeDriver(["dlg", "dlg", "panel", "panel"] + ["preview"] * 4)
+    vis = FakeVision(
+        screen_by_frame={"dlg": "dialog", "panel": "boss_panel", "preview": "preview"},
+        buttons_by_frame={
+            "panel": {"assault": ASSAULT_MATCH},
+            "preview": {"start_assault": SEND_MATCH},
+        },
+        dialog_frames={"dlg"},
+    )
+    return drv, vis, FakeActions()
+
 def test_run_once_refills_from_preview():
-    drv, vis, acts = _happy()
+    drv, vis, acts = _happy_with_energy_trip()
     c, res = _run(drv, vis, acts, refill=True)
     assert res == "dispatched"
     assert acts.refilled == 1 and acts.reads == 0
     assert c.last_flasks == 251
 
 def test_run_once_reads_flasks_without_spending():
-    drv, vis, acts = _happy()
+    drv, vis, acts = _happy_with_energy_trip()
     c, res = _run(drv, vis, acts, want_flasks=True)
     assert res == "dispatched"
     assert acts.reads == 1 and acts.refilled == 0
@@ -164,11 +178,27 @@ def test_run_once_does_not_touch_energy_window_by_default():
     assert c.last_flasks is None
 
 def test_last_flasks_none_when_energy_window_failed():
-    drv, vis, acts = _happy()
+    drv, vis, acts = _happy_with_energy_trip()
     acts.flasks = -1                     # окно энергии не открылось
     c, res = _run(drv, vis, acts, want_flasks=True)
     assert res == "dispatched"
     assert c.last_flasks is None
+
+def test_run_once_aborts_if_preview_gone_after_energy_window():
+    """Окно энергии не закрылось -> «Начать Штурм» недоступен: отменяем заход,
+    а не тапаем вслепую по чужому окну."""
+    drv = FakeDriver(["dlg", "dlg", "panel", "panel", "preview", "energy"])
+    vis = FakeVision(
+        screen_by_frame={"dlg": "dialog", "panel": "boss_panel", "preview": "preview"},
+        buttons_by_frame={
+            "panel": {"assault": ASSAULT_MATCH},
+            "preview": {"start_assault": SEND_MATCH},
+        },
+        dialog_frames={"dlg"},
+    )
+    _, res = _run(drv, vis, FakeActions(), want_flasks=True)
+    assert res == "failed"
+    assert SEND_MATCH not in drv.taps
 
 def test_verdict_gate_off_by_default_dispatches_on_lose():
     drv, vis, acts = _happy()

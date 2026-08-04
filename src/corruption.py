@@ -28,6 +28,15 @@ class CorruptionActions:
             self.sleep(0.3)
         return False
 
+    def _wait_dialog(self):
+        """Диалог поиска выезжает анимацией — одиночной проверки мало."""
+        t = self.cfg.panel_verify_timeout_s
+        for _ in range(max(1, int(t / 0.3))):
+            if self.vision.search_dialog_open(self.driver.screenshot()):
+                return True
+            self.sleep(0.3)
+        return False
+
     def _safe_back(self):
         """Системная «назад» + страховка. На ЧИСТОЙ карте «назад» открывает
         «Выйти из игры?» — если это проглядеть, следующий слепой тап может
@@ -51,20 +60,22 @@ class CorruptionActions:
     def _side_trip(self, refill, want_flasks):
         """Склянки читаются/тратятся ТОЛЬКО с превью: с карты «+» тапнет кнопку
         дома. refill — применить фиолетовую +50; want_flasks — только прочитать
-        остаток. Окно не открылось -> last_flasks остаётся неизвестным."""
+        остаток. Окно не открылось -> last_flasks остаётся неизвестным.
+        Возвращает True, если в окно энергии реально ходили."""
         if refill:
             n = self.actions.refill_energy()
         elif want_flasks:
             n = self.actions.flasks_left()
         else:
-            return
+            return False
         self.last_flasks = n if n is not None and n >= 0 else None
+        return True
 
     def run_once(self, refill=False, want_flasks=False):
         """Один заход поиск->штурм. 'dispatched' | 'failed' | 'skip_unwinnable'."""
         self.driver.tap(*self.cfg.corruption_search_icon_xy)
-        self.sleep(1.2)
-        if not self.vision.search_dialog_open(self.driver.screenshot()):
+        self.sleep(0.8)
+        if not self._wait_dialog():
             return self._abort("диалог поиска не открылся")
 
         # вкладка может быть не выбрана -> тапаем ВСЕГДА, без проверки активности
@@ -93,7 +104,11 @@ class CorruptionActions:
                 self.sleep(0.6)
                 return "skip_unwinnable"
 
-        self._side_trip(refill, want_flasks)
+        if self._side_trip(refill, want_flasks):
+            # окно энергии перекрывает превью и закрывается с анимацией —
+            # без ожидания «Начать Штурм» ещё не виден и заход срывается
+            if not self._wait_screen('preview'):
+                return self._abort("превью не вернулось после окна энергии")
 
         send = self.vision.find_button(self.driver.screenshot(), "start_assault")
         if send is None:
