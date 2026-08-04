@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from src.models import Box
 
 @dataclass
 class Config:
@@ -152,3 +153,37 @@ class Config:
 
     # --- Антибот: человечные тапы ---
     tap_size_default: tuple = (40, 24)   # ±20 / ±12 от центра для координат без размера
+
+    # --- Антибот: размеры кнопок для ФИКСИРОВАННЫХ координат ---
+    # У шаблонных кнопок размер приходит из шаблона (см. vision.find_button),
+    # здесь только те, что тапаются по координате из конфига. Замерено по
+    # reference/*.png; заниженное значение безопаснее завышенного — сэмплим
+    # всё равно только центральные tap_inset долей бокса.
+    tap_sizes: dict = field(default_factory=lambda: {
+        "corruption_search_icon": (86, 86),
+        "corruption_tab": (200, 64),
+        "corruption_search": (300, 88),
+        "corruption_assault": (280, 84),
+        "corruption_boost_energy": (300, 88),
+        "flask_use": (150, 56),
+        "energy_window_close": (60, 60),
+        "energy_open": (60, 60),
+        "exit_cancel": (200, 72),
+        "preview_close": (400, 160),
+        "squad_slot": (180, 120),
+        "event_button": (120, 120),
+        "search_thief_tab": (200, 64),
+        "search_button": (240, 84),
+        # Тап по ЦЕЛИ на карте — не кнопка, а иконка черепа с мелким хитбоксом.
+        # Промах зумит карту, детекция перестаёт ловить спрайты, а отзумить бот
+        # сам не может. Координата выстрадана калибровкой (центр bbox = лицо
+        # черепа, offset не нужен) -> разброс минимальный, по эффекту не шире
+        # нынешнего jitter ±4px. Человечность тут даёт время, а не координата.
+        "target": (16, 16),
+    })
+
+    def tap_box(self, name, xy):
+        """Бокс для тапа по ФИКСИРОВАННОЙ координате: размер берём по имени
+        кнопки из tap_sizes, для неизвестных имён — tap_size_default."""
+        w, h = self.tap_sizes.get(name, self.tap_size_default)
+        return Box(int(xy[0]), int(xy[1]), int(w), int(h))

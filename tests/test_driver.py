@@ -33,3 +33,12 @@ def test_tap_accepts_box_and_tuple():
 
     assert calls == [("shell", "input", "tap", "500", "800"),
                      ("shell", "input", "tap", "10", "20")]
+
+def test_tap_box_uses_named_size_and_falls_back_to_default():
+    cfg = Config()
+    known = cfg.tap_box("corruption_search", (548, 1785))
+    unknown = cfg.tap_box("такой_кнопки_нет", (100, 200))
+
+    assert known.center == (548, 1785)
+    assert (known.w, known.h) == cfg.tap_sizes["corruption_search"]
+    assert (unknown.w, unknown.h) == cfg.tap_size_default
