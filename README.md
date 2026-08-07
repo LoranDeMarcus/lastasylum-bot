@@ -15,7 +15,7 @@ pip install -r requirements.txt
 ## Запуск
 
 ```
-python -m src.app        # GUI: Start / Stop + поле «Мин. остаток склянок»
+python -m src.app        # GUI: Start / Stop, «Мин. остаток склянок», чекбокс 4-го отряда
 ```
 
 ## Режимы (`config.py`, поле `strategy`)

@@ -238,19 +238,25 @@ def test_corruption_dry_run_does_not_act():
     assert eng.one_iteration().type == "assault_boss"
     assert corr.calls == []
 
-def test_corruption_start_takes_flask_stock_from_config():
+def test_corruption_start_leaves_stock_unknown_until_read_from_game():
+    """Ручного поля больше нет: остаток берётся из «В наличии: N» после
+    первого рефилла, до этого он неизвестен и порог не ограничивает."""
     corr = FakeCorruption()
     eng = _mk_corruption_engine(corr)
-    eng.cfg.flask_count_start = 240
+    eng.flasks = None
     eng.start()
-    assert eng.flasks == 240
+    assert eng.flasks is None
 
-def test_corruption_start_treats_zero_stock_as_unknown():
-    corr = FakeCorruption()
+def test_unreadable_stock_is_logged_not_silently_ignored():
+    """Раньше эту дыру закрывало ручное поле: если «В наличии: N» не
+    прочиталось, порог молча перестаёт действовать."""
+    lines = []
+    corr = FakeCorruption(["dispatched"], spend=2, stock=None)
     eng = _mk_corruption_engine(corr)
-    eng.cfg.flask_count_start = 0
-    eng.start()
-    assert eng.flasks is None                # неизвестно -> порог не ограничивает
+    eng.log = lines.append
+    eng.flasks = None
+    eng.one_iteration()
+    assert any("прочитать не удалось" in s for s in lines)
 
 def test_search_strategy_searches_when_idle():
     act = FakeActions()
