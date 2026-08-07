@@ -5,3 +5,4 @@ __pycache__/
 tests/fixtures/*.png
 debug/
 STOP
+reference/anomaly/

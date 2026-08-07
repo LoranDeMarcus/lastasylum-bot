@@ -12,8 +12,8 @@ class FakeDriver:
         f = self._frames[min(self.i, len(self._frames) - 1)]
         self.i += 1
         return f
-    def tap(self, x, y):
-        self.taps.append((x, y))
+    def tap(self, target):
+        self.taps.append(tuple(target.center) if hasattr(target, "center") else tuple(target))
     def swipe(self, *a, **k):
         pass
     def back(self):

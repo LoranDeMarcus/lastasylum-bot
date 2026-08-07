@@ -1,5 +1,8 @@
+import random
 from config import Config
+from src.cancel import Cancel
 from src.corruption import CorruptionActions
+from src.human import Human
 
 class FakeDriver:
     """Кадры выдаются по очереди; последний повторяется."""
@@ -12,8 +15,8 @@ class FakeDriver:
         f = self._frames[min(self.i, len(self._frames) - 1)]
         self.i += 1
         return f
-    def tap(self, x, y):
-        self.taps.append((x, y))
+    def tap(self, target):
+        self.taps.append(tuple(target.center) if hasattr(target, "center") else tuple(target))
     def back(self):
         self.backs += 1
 
@@ -332,3 +335,54 @@ def test_verdict_gate_on_dispatches_on_win():
     _, res = _run(drv, vis, acts, cfg)
     assert res == "dispatched"
     assert acts.closed == 0
+
+def test_run_once_makes_no_taps_when_already_stopped():
+    """Стоп нажат до захода — ни одного тапа."""
+    drv, vis, acts = _happy()
+    cancel = Cancel()
+    cancel.set()
+    c = CorruptionActions(drv, vis, acts, Config(), log=lambda *_: None,
+                          sleep=lambda *_: None, cancel=cancel)
+    assert c.run_once() == "stopped"
+    assert drv.taps == []
+
+def test_run_once_aborts_mid_flow_without_further_taps():
+    """Стоп посреди захода: экран оставляем как есть, но больше не тапаем."""
+    drv, vis, acts = _happy()
+    cancel = Cancel()
+    c = CorruptionActions(drv, vis, acts, Config(), log=lambda *_: None,
+                          sleep=lambda *_: None, cancel=cancel)
+    orig_tap = drv.tap
+    def tap_then_stop(target):
+        orig_tap(target)
+        if len(drv.taps) == 2:
+            cancel.set()
+    drv.tap = tap_then_stop
+
+    assert c.run_once() == "stopped"
+    assert len(drv.taps) == 2          # третьего тапа не было
+    assert drv.backs == 0              # и «прибираться» тоже не просили
+
+def test_wait_loops_give_up_on_stop():
+    """Цикл ожидания экрана не должен докручивать таймаут после Стопа."""
+    drv = FakeDriver(["чужое"])
+    vis = FakeVision(screen_by_frame={})
+    cancel = Cancel()
+    cancel.set()
+    c = CorruptionActions(drv, vis, FakeActions(), Config(), log=lambda *_: None,
+                          sleep=lambda *_: None, cancel=cancel)
+    assert c._wait_any({'dialog'}) is None
+    assert drv.i <= 1                  # максимум один кадр, а не весь таймаут
+
+def test_pauses_never_shorter_than_calibrated_values():
+    """Человечные паузы только растягивают откалиброванные ожидания."""
+    cfg = Config()
+    drv, vis, acts = _happy()          # хелпер файла, возвращает три значения
+    slept = []
+    human = Human(cfg, rng=random.Random(11), sleep=slept.append)
+    c = CorruptionActions(drv, vis, acts, cfg, log=lambda *_: None,
+                          sleep=slept.append, human=human)
+    c.run_once()
+    assert slept, "паузы должны быть"
+    assert min(slept) >= 0.3          # ни одна пауза не короче самой мелкой базовой
+    assert len(set(slept)) > 3        # и они не одинаковые

@@ -3,6 +3,7 @@ import subprocess
 from typing import Protocol
 import numpy as np
 import cv2
+from src.models import Box
 
 def jitter(x, y, px, rng):
     if px == 0:
@@ -11,12 +12,13 @@ def jitter(x, y, px, rng):
 
 class Driver(Protocol):
     def screenshot(self): ...
-    def tap(self, x, y): ...
+    def tap(self, target): ...
     def swipe(self, x1, y1, x2, y2, dur_ms): ...
 
 class AdbDriver:
-    def __init__(self, cfg):
+    def __init__(self, cfg, human=None):
         self.cfg = cfg
+        self.human = human
         self._rng = random.Random()
 
     def _adb(self, *args, capture=False):
@@ -34,9 +36,26 @@ class AdbDriver:
             raise RuntimeError("ADB screencap decode failed")
         return img
 
-    def tap(self, x, y):
-        jx, jy = jitter(int(x), int(y), self.cfg.jitter_px, self._rng)
-        self._adb("shell", "input", "tap", str(jx), str(jy))
+    def tap(self, target):
+        """target: Box (кнопка со своим размером) или кортеж (x, y).
+
+        С Human тап приходит в случайную точку ВНУТРИ кнопки: одна и та же
+        выверенная координата — машинный признак. Без Human — старое
+        поведение (центр + jitter), чтобы tools/*.py работали без правок."""
+        box = target if isinstance(target, Box) else Box.at(target, self.cfg.tap_size_default)
+        if self.human is not None and self.cfg.human_enabled:
+            x, y = self.human.point_in(box)
+        else:
+            x, y = jitter(box.x, box.y, self.cfg.jitter_px, self._rng)
+        if self.human is not None and self.cfg.human_enabled and self.cfg.human_tap_hold:
+            # input tap = down/up с нулевой длительностью. Нажатие переменной
+            # длины делается swipe'ом в ту же точку. Флаг выключен по
+            # умолчанию: это другой тип события, игра МОЖЕТ отработать его
+            # как долгое нажатие — включать после живой проверки.
+            ms = self.human.hold_ms()
+            self._adb("shell", "input", "swipe", str(x), str(y), str(x), str(y), str(ms))
+        else:
+            self._adb("shell", "input", "tap", str(x), str(y))
 
     def back(self):
         """Системная «назад» — закрывает случайно открытый диалог/меню.

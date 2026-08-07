@@ -1,6 +1,8 @@
 # tests/test_engine.py
 import threading
+import time
 from config import Config
+from src.cancel import Cancel
 from src.models import GameState, Target
 from src.engine import BotEngine
 
@@ -102,13 +104,61 @@ class FakeCorruption:
                 self._stock -= self._spend
         return self.results.pop(0) if self.results else "dispatched"
 
-def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251):
-    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption")
+def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251, fourth=True):
+    # существующие тесты писались, когда бот занимал все четыре отряда ->
+    # по умолчанию в хелпере включаем 4-й, а резерв проверяем отдельными тестами
+    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption",
+                 use_fourth_squad=fourth)
     eng = BotEngine(driver=FakeDriver(), vision=FakeVision(energy=energy, active=active),
                     actions=FakeActions(), cfg=cfg, log=lambda m: None,
                     sleep=lambda s: None, corruption=corruption)
     eng.flasks = flasks
     return eng
+
+class FakeWatchdog:
+    def __init__(self, verdicts):
+        self.verdicts = list(verdicts)
+        self.calls = 0
+    def check(self):
+        self.calls += 1
+        return self.verdicts.pop(0) if self.verdicts else 'ok'
+
+class _NoopCorruption:
+    """Штурма быть не должно: сторож обязан развернуть итерацию раньше."""
+    flasks_used = 0
+    last_flask_stock = None
+    def run_once(self, refill=False):
+        raise AssertionError("движок не должен доходить до штурма")
+
+def test_corruption_iteration_stops_on_watchdog_verdict():
+    eng = _mk_corruption_engine(_NoopCorruption())
+    eng.watchdog = FakeWatchdog(['stop'])
+    action = eng.one_iteration()
+    assert action is not None and action.type == 'stop'
+
+def test_corruption_iteration_skips_turn_after_recovery():
+    """recovered -> итерация начинается заново со свежего кадра, не тапая."""
+    eng = _mk_corruption_engine(_NoopCorruption())
+    eng.watchdog = FakeWatchdog(['recovered'])
+    assert eng.one_iteration() is None
+
+def test_idle_wait_wakes_up_on_stop():
+    """Ожидание «все отряды заняты» — самая длинная пауза бота (10-14 с).
+    Стоп должен будить из неё, а не только между итерациями.
+
+    Отмена взводится ИЗ ТАЙМЕРА, а не заранее: заранее взведённая отмена
+    развернула бы итерацию ещё на входе, и тест перестал бы проверять
+    пробуждение из паузы."""
+    cancel = Cancel()
+    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption")
+    eng = BotEngine(driver=FakeDriver(), vision=FakeVision(active=4),
+                    actions=FakeActions(), cfg=cfg, log=lambda m: None,
+                    sleep=cancel.sleep, corruption=FakeCorruption(), cancel=cancel)
+    eng.flasks = 251
+    threading.Timer(0.1, cancel.set).start()
+    t0 = time.perf_counter()
+    assert eng.one_iteration() is None
+    assert time.perf_counter() - t0 < 2.0      # а не corruption_poll_interval_s = 10 с
 
 def test_corruption_dispatches_when_squad_free():
     corr = FakeCorruption(["dispatched"])
@@ -121,6 +171,18 @@ def test_corruption_waits_when_all_squads_busy():
     eng = _mk_corruption_engine(corr, active=4)
     assert eng.one_iteration() is None
     assert corr.calls == []                  # ни одного захода
+
+def test_corruption_waits_when_fourth_squad_is_reserved():
+    """Три отряда заняты, четвёртый зарезервирован -> ждём, а не шлём."""
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr, active=3, fourth=False)
+    assert eng.one_iteration() is None
+    assert corr.calls == []
+
+def test_corruption_uses_fourth_squad_when_enabled():
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, active=3, fourth=True)
+    assert eng.one_iteration().type == "assault_boss"
 
 def test_corruption_dispatches_on_last_free_slot():
     corr = FakeCorruption(["dispatched"])
@@ -193,6 +255,24 @@ def test_corruption_failure_counter_resets_on_success():
         action = eng.one_iteration()
     assert action.type == "assault_boss"     # 3 подряд не набралось -> не стоп
 
+def test_corruption_stopped_result_stops_engine_without_counting_failure():
+    """'stopped' — не провал: человек сам нажал кнопку."""
+    corr = FakeCorruption(["stopped"])
+    eng = _mk_corruption_engine(corr, active=1)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._no_progress == 0
+
+def test_iteration_returns_stop_when_cancelled_before_start():
+    corr = FakeCorruption()
+    cancel = Cancel()
+    cancel.set()
+    eng = _mk_corruption_engine(corr, active=0)
+    eng.cancel = cancel
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert corr.calls == []            # до штурма не дошло
+
 def test_corruption_dry_run_does_not_act():
     corr = FakeCorruption()
     eng = _mk_corruption_engine(corr)
@@ -200,19 +280,25 @@ def test_corruption_dry_run_does_not_act():
     assert eng.one_iteration().type == "assault_boss"
     assert corr.calls == []
 
-def test_corruption_start_takes_flask_stock_from_config():
+def test_corruption_start_leaves_stock_unknown_until_read_from_game():
+    """Ручного поля больше нет: остаток берётся из «В наличии: N» после
+    первого рефилла, до этого он неизвестен и порог не ограничивает."""
     corr = FakeCorruption()
     eng = _mk_corruption_engine(corr)
-    eng.cfg.flask_count_start = 240
+    eng.flasks = None
     eng.start()
-    assert eng.flasks == 240
+    assert eng.flasks is None
 
-def test_corruption_start_treats_zero_stock_as_unknown():
-    corr = FakeCorruption()
+def test_unreadable_stock_is_logged_not_silently_ignored():
+    """Раньше эту дыру закрывало ручное поле: если «В наличии: N» не
+    прочиталось, порог молча перестаёт действовать."""
+    lines = []
+    corr = FakeCorruption(["dispatched"], spend=2, stock=None)
     eng = _mk_corruption_engine(corr)
-    eng.cfg.flask_count_start = 0
-    eng.start()
-    assert eng.flasks is None                # неизвестно -> порог не ограничивает
+    eng.log = lines.append
+    eng.flasks = None
+    eng.one_iteration()
+    assert any("прочитать не удалось" in s for s in lines)
 
 def test_search_strategy_searches_when_idle():
     act = FakeActions()

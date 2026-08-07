@@ -1,12 +1,16 @@
 # src/gui.py
 import queue
 import threading
+from src.cancel import Cancel
 
 class BotController:
+    """Владелец отмены: один Cancel уходит и в фабрику (там на нём строятся
+    все паузы), и в поток движка (там он обычный stop_event)."""
+
     def __init__(self, engine_factory):
         self._factory = engine_factory
         self._thread = None
-        self._stop = threading.Event()
+        self._cancel = Cancel()
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -14,28 +18,13 @@ class BotController:
     def start(self):
         if self.is_running():
             return
-        self._stop.clear()
-        engine = self._factory()
-        self._thread = threading.Thread(target=engine.run, args=(self._stop,), daemon=True)
+        self._cancel.clear()
+        engine = self._factory(self._cancel)
+        self._thread = threading.Thread(target=engine.run, args=(self._cancel,), daemon=True)
         self._thread.start()
 
     def stop(self):
-        self._stop.set()
-
-def apply_flask_count(cfg, raw):
-    """Применить введённый в GUI текущий остаток склянок. Его приходится
-    задавать руками: в окне энергии «В наличии: N» перекрыт счётчиком
-    количества и не читается, поэтому бот ведёт остаток локально, вычитая
-    реально потраченное. 0 = «не знаю», тогда порог не ограничивает.
-    Мусорный/отрицательный ввод игнорируем."""
-    try:
-        n = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return cfg.flask_count_start
-    if n < 0:
-        return cfg.flask_count_start
-    cfg.flask_count_start = n
-    return n
+        self._cancel.set()
 
 def apply_flask_threshold(cfg, raw):
     """Применить введённый в GUI нижний порог остатка склянок: ниже него бот
@@ -77,26 +66,42 @@ def run_gui(controller, log_queue=None, cfg=None):
         root.after(200, poll)
 
     if cfg is not None:
+        # Текущий остаток склянок бот читает сам («В наличии: N» после первого
+        # рефилла), руками задаётся только порог — это решение человека.
         row = tk.Frame(root); row.pack(pady=(0, 2))
-        tk.Label(row, text="Склянок сейчас:").pack(side="left", padx=(0, 4))
-        count_var = tk.StringVar(value=str(cfg.flask_count_start))
-        tk.Entry(row, width=7, textvariable=count_var).pack(side="left", padx=(0, 10))
-        tk.Label(row, text="Мин. остаток:").pack(side="left", padx=(0, 4))
+        tk.Label(row, text="Мин. остаток склянок:").pack(side="left", padx=(0, 4))
         thr_var = tk.StringVar(value=str(cfg.flask_stop_threshold))
         tk.Entry(row, width=7, textvariable=thr_var).pack(side="left")
 
         def apply_settings():
-            count_var.set(str(apply_flask_count(cfg, count_var.get())))
             thr_var.set(str(apply_flask_threshold(cfg, thr_var.get())))
             if log_queue is not None:
-                log_queue.put(f"Склянок: {cfg.flask_count_start}, "
-                              f"не тратить ниже {cfg.flask_stop_threshold}")
+                log_queue.put(f"Не тратить склянки ниже {cfg.flask_stop_threshold}")
 
         tk.Button(row, text="Применить", command=apply_settings).pack(side="left", padx=6)
+
+        squad_row = tk.Frame(root); squad_row.pack(pady=(0, 2))
+        fourth_var = tk.BooleanVar(value=cfg.use_fourth_squad)
+
+        def toggle_fourth():
+            # пишем в cfg сразу, без «Применить»: движок читает cfg каждую
+            # итерацию, значит переключать можно не останавливая бота
+            cfg.use_fourth_squad = bool(fourth_var.get())
+            if log_queue is not None:
+                log_queue.put(f"Отрядов бот занимает максимум: {cfg.squad_limit()}")
+
+        tk.Checkbutton(squad_row, text="Отправлять 4-й отряд",
+                       variable=fourth_var, command=toggle_fourth).pack(side="left")
+
+    def request_stop():
+        # без этой строки пауза до первой реакции выглядит как «кнопка не работает»
+        controller.stop()
+        if log_queue is not None:
+            log_queue.put("Стоп запрошен — доигрываю текущий шаг.")
 
     btns = tk.Frame(root); btns.pack(pady=6)
     tk.Button(btns, text="Start", width=12,
               command=controller.start).pack(side="left", padx=6)
     tk.Button(btns, text="Stop", width=12,
-              command=controller.stop).pack(side="left", padx=6)
+              command=request_stop).pack(side="left", padx=6)
     root.mainloop()

@@ -2,7 +2,7 @@
 import time
 import threading
 from config import Config
-from src.gui import BotController, apply_flask_threshold, apply_flask_count
+from src.gui import BotController, apply_flask_threshold
 
 class DummyEngine:
     def __init__(self):
@@ -15,7 +15,7 @@ class DummyEngine:
 
 def test_controller_start_and_stop():
     eng = DummyEngine()
-    ctrl = BotController(lambda: eng)
+    ctrl = BotController(lambda cancel: eng)
     ctrl.start()
     assert eng.ran.wait(timeout=1.0)
     assert ctrl.is_running()
@@ -25,10 +25,37 @@ def test_controller_start_and_stop():
 
 def test_controller_double_start_is_noop():
     eng = DummyEngine()
-    ctrl = BotController(lambda: eng)
+    ctrl = BotController(lambda cancel: eng)
     ctrl.start()
     ctrl.start()   # не должен падать/плодить потоки
     assert ctrl.is_running()
+    ctrl.stop()
+
+def test_controller_gives_factory_the_same_cancel_it_stops():
+    """Фабрика собирает компоненты вокруг того же объекта, который взводит
+    кнопка Стоп, — иначе паузы просыпаться не будут."""
+    seen = []
+    eng = DummyEngine()
+    def factory(cancel):
+        seen.append(cancel)
+        return eng
+    ctrl = BotController(factory)
+    ctrl.start()
+    assert eng.ran.wait(timeout=1.0)
+    ctrl.stop()
+    assert len(seen) == 1 and seen[0].is_set()
+
+def test_controller_clears_cancel_on_restart():
+    """Второй Start не должен стартовать с уже взведённым Стопом."""
+    eng = DummyEngine()
+    seen = []
+    ctrl = BotController(lambda cancel: seen.append(cancel) or eng)
+    ctrl.start()
+    ctrl.stop()
+    time.sleep(0.1)
+    eng.ran.clear()
+    ctrl.start()
+    assert seen[-1].is_set() is False
     ctrl.stop()
 
 # --- Поле «Мин. остаток склянок» ---
@@ -60,22 +87,3 @@ def test_apply_flask_threshold_accepts_zero_and_spaces():
     cfg = Config()
     assert apply_flask_threshold(cfg, "  0 ") == 0
     assert cfg.flask_stop_threshold == 0
-
-# --- Поле «Склянок сейчас» ---
-
-def test_apply_flask_count_sets_value():
-    cfg = Config()
-    assert apply_flask_count(cfg, "251") == 251
-    assert cfg.flask_count_start == 251
-
-def test_apply_flask_count_zero_means_unknown():
-    cfg = Config()
-    assert apply_flask_count(cfg, "0") == 0
-    assert cfg.flask_count_start == 0
-
-def test_apply_flask_count_ignores_garbage_and_negative():
-    cfg = Config()
-    cfg.flask_count_start = 200
-    assert apply_flask_count(cfg, "две") == 200
-    assert apply_flask_count(cfg, "-1") == 200
-    assert cfg.flask_count_start == 200

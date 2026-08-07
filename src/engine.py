@@ -3,7 +3,9 @@ import os
 import time
 import traceback
 from src.models import GameState, Action, nearest
+from src.cancel import Cancel
 from src.decide import decide
+from src.human import Human
 
 class BotEngine:
     """Цикл фарма. Один отряд-на-задачу за раз (v1 последовательный):
@@ -14,14 +16,21 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None):
+                 corruption=None, human=None, cancel=None, watchdog=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
+        # если human не передан — свой, но спящий через тот же sleep (тесты
+        # подсовывают фейковый sleep и должны видеть паузы именно там)
+        self.human = human if human is not None else Human(cfg, sleep=sleep)
+        # cancel всегда объект, а не None: точки проверки читаются
+        # как `if self.cancel.stopped()`, без проверок на None в каждой
+        self.cancel = cancel if cancel is not None else Cancel()
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
+        self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
@@ -32,12 +41,12 @@ class BotEngine:
             self.flasks = 10 ** 9        # в dry-run не открываем энергоокно
             self.log("Старт (DRY-RUN: тапов не будет).")
         elif self.cfg.strategy == "corruption":
-            # «В наличии: N» в окне энергии перекрыт счётчиком количества и не
-            # читается -> остаток ведём локально от значения, заданного в GUI.
-            # 0 = неизвестно: порог не ограничивает, склянки тратятся свободно.
-            self.flasks = self.cfg.flask_count_start or None
-            self.log("Старт («Элитная скверна»). Склянок по учёту: "
-                     + (str(self.flasks) if self.flasks else "неизвестно"))
+            # «В наличии: N» в окне энергии перекрыт счётчиком количества и
+            # читается только ПОСЛЕ применения склянок. Поэтому на старте
+            # остаток неизвестен: первый рефилл разрешён и он же его покажет.
+            self.flasks = None
+            self.log("Старт («Элитная скверна»). Остаток склянок прочитаю "
+                     "из игры после первого рефилла.")
         elif self.cfg.use_search_strategy:
             # окно энергии открывается только с превью отправки; с карты «+»
             # тапнет кнопку дома -> склянки прочитаем на первом же превью
@@ -93,7 +102,7 @@ class BotEngine:
         squad = self.vision.squad_state(img)
         if not self._squad_ready(squad):
             self.log(f"Отряд занят ({squad}), ждём.")
-            self.sleep(2.0)
+            self.sleep(self.human.idle_s(2.0))
             return None
 
         energy = self.vision.read_energy(img)
@@ -139,11 +148,20 @@ class BotEngine:
 
         Тапа по карте нет (панель босса открывает сам «Поиск»), поэтому guard
         вида и авто-отзум тут не нужны."""
+        # Сторож ПЕРЕД всем остальным: дальше идёт слепой тап по лупе
+        # (78,1530), и если под ней не игра, а чужой экран — тап уйдёт мимо.
+        if self.watchdog is not None:
+            verdict = self.watchdog.check()
+            if verdict == 'stop':
+                return Action('stop')
+            if verdict == 'recovered':
+                return None
         img = self.driver.screenshot()
         active = self.vision.active_squads(img)
-        if active >= self.cfg.squad_total:
-            self.log(f"Все отряды заняты ({active}/{self.cfg.squad_total}), ждём.")
-            self.sleep(self.cfg.corruption_poll_interval_s)
+        limit = self.cfg.squad_limit()
+        if active >= limit:
+            self.log(f"Занято {active} из {limit} разрешённых, ждём.")
+            self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
             return None
 
         energy = self.vision.read_energy(img)
@@ -157,7 +175,7 @@ class BotEngine:
             self.log(f"Склянок {self.flasks} <= порога "
                      f"{self.cfg.flask_stop_threshold} — склянки не тратим.")
 
-        self.log(f"[отрядов={active}/{self.cfg.squad_total}] энергия={energy} "
+        self.log(f"[отрядов={active}/{limit}] энергия={energy} "
                  f"склянок={self.flasks}" + (" (+рефилл разрешён)" if refill else "")
                  + " -> штурм скверны")
         if self.cfg.dry_run:
@@ -166,6 +184,10 @@ class BotEngine:
 
         used_before = self.corruption.flasks_used
         res = self.corruption.run_once(refill=refill)
+        if res == 'stopped':
+            # остановка по кнопке — не провал бота, счётчик провалов не трогаем
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
         self.log(f"  Штурм скверны -> {res}")
         spent = self.corruption.flasks_used - used_before
         if self.corruption.last_flask_stock is not None:
@@ -173,6 +195,10 @@ class BotEngine:
             self.flasks = self.corruption.last_flask_stock
         elif spent and self.flasks is not None:
             self.flasks = max(0, self.flasks - spent)
+        elif spent:
+            # Вести остаток не от чего: ручного поля больше нет, а «В наличии»
+            # не прочиталось. Молчать нельзя — порог сейчас не работает.
+            self.log("  остаток склянок прочитать не удалось — порог не действует")
         if spent:
             self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
 
@@ -195,6 +221,9 @@ class BotEngine:
         return Action('assault_boss')
 
     def one_iteration(self):
+        # Стоп мог прийти, пока движок спал между итерациями
+        if self.cancel.stopped():
+            return Action('stop')
         if self.cfg.strategy == "corruption":
             return self._corruption_iteration()
         if self.cfg.use_search_strategy:
@@ -211,10 +240,10 @@ class BotEngine:
                 self._offmap_pinches += 1
                 self.log(f"Не на карте — авто-отзум щипком ({self._offmap_pinches}/{self.cfg.max_pinch_recover}).")
                 self.driver.zoom_out()
-                self.sleep(1.5)
+                self.human.after_tap(1.5)
             else:
                 self.log("Не на карте и щипок не помог (меню?) — жду человека.")
-                self.sleep(2.0)
+                self.sleep(self.human.idle_s(2.0))
             return None
         self._offmap_pinches = 0     # снова на карте -> сброс счётчика
 
@@ -224,7 +253,7 @@ class BotEngine:
         # отряд в походе и слать рано -> ждём
         if not self._squad_ready(squad):
             self.log(f"Отряд занят ({squad}), ждём.")
-            self.sleep(2.0)
+            self.sleep(self.human.idle_s(2.0))
             return None
 
         # исключаем непроходимых боссов, помеченных ранее
@@ -285,4 +314,4 @@ class BotEngine:
                 return 'error'
             if action is not None and action.type == 'stop' and not self.cfg.dry_run:
                 return 'stop'
-            self.sleep(0.5)
+            self.sleep(self.human.idle_s(0.5))

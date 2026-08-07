@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from src.models import Target
+from src.models import Target, Box
 
 class Vision:
     def __init__(self, cfg, reader):
@@ -161,6 +161,65 @@ class Vision:
         score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
         return score >= self.cfg.worldmap_threshold
 
+    def on_game_view(self, img):
+        """Мы в игре на игровом виде — при ЛЮБОМ зуме.
+
+        Якорь — иконка молнии в HUD энергии (не цифры: они меняются).
+        Нужен отдельно от on_world_map, потому что в режиме скверны камера
+        часто стоит в зум-ине после follow-cam, а легенды карты там нет —
+        без этого якоря сторож считал бы нормальную работу аномалией.
+
+        Под модальными диалогами игра блюрит фон, поэтому сквозь чужой экран
+        якорь не протекает. Замер по референс-кадрам: игровые виды
+        0.820…1.000, модалки 0.519/0.544 -> порог 0.7 посреди разрыва."""
+        x, y, w, h = self.cfg.hud_energy_region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl("hud_energy")
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return False
+        score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+        return score >= self.cfg.hud_energy_threshold
+
+    def classify_screen(self, img):
+        """Что сейчас на экране — один ответ вместо россыпи предикатов.
+
+        Порядок сверху вниз по слоям: сначала то, что перекрывает остальное,
+        иначе окно энергии поверх превью опозналось бы как превью.
+
+        base_view проверяется РАНЬШЕ game_view: HUD энергии в базе тоже виден
+        (замер 0.911), и якорь «мы в игре» сказал бы «всё нормально» — а
+        дальше по флоу идёт слепой тап по лупе."""
+        if self.exit_dialog_open(img):
+            return 'exit_dialog'
+        if self.energy_window_open(img):
+            return 'energy_window'
+        screen = self.corruption_screen(img)
+        if screen is not None:
+            return screen
+        if self.on_world_map(img):
+            return 'world_map'
+        if self.on_base_view(img):
+            return 'base_view'
+        if self.on_game_view(img):
+            return 'game_view'
+        return 'unknown'
+
+    def on_base_view(self, img):
+        """Мы в базе (не на карте мира).
+
+        Якорь — сама кнопка «Мир» в правом нижнем углу: на карте мира на её
+        месте стоит кнопка дома, поэтому спутать их нельзя. Ищем в узкой
+        полосе угла, как worldmap_legend: это режет ложные матчи.
+
+        Замер по референс-кадрам: база 1.00, все прочие 28 кадров <= 0.27."""
+        x, y, w, h = self.cfg.world_button_region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl("world_button")
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return False
+        score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+        return score >= self.cfg.world_button_threshold
+
     def win_prediction(self, img):
         """Прогноз боя из превью отправки: 'win' («Лёгкая победа») |
         'lose' («Без шансов на победу») | None (не распознан). Ищем шаблоны
@@ -238,6 +297,10 @@ class Vision:
         return self._state_cache[name]
 
     def find_button(self, img, name):
+        """Кнопка по шаблону -> Box (центр + размер шаблона) или None.
+
+        Размер отдаём наружу, потому что тап должен приходить в случайную
+        точку внутри кнопки, а не всегда в её центр."""
         path = os.path.join(self.cfg.templates_dir, f"{name}.png")
         tpl = cv2.imread(path, cv2.IMREAD_COLOR)
         if tpl is None:
@@ -247,7 +310,7 @@ class Vision:
         if maxv < self.cfg.template_match_threshold:
             return None
         th, tw = tpl.shape[:2]
-        return (maxloc[0] + tw // 2, maxloc[1] + th // 2)
+        return Box(maxloc[0] + tw // 2, maxloc[1] + th // 2, tw, th)
 
     def read_energy(self, img):
         """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,

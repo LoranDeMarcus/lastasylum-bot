@@ -81,6 +81,65 @@ def test_on_world_map_false_on_blank():
 def _ref(name):
     return cv2.imread(os.path.join("reference", name))
 
+# --- Якорь «мы в игре» (HUD энергии) и классификация экрана ---
+
+def test_on_game_view_true_for_game_frames_regardless_of_energy_value():
+    """Якорь — иконка молнии, а не цифры: 81 / 50 / 42 на разных кадрах."""
+    vis = Vision(Config(), reader=None)
+    for name in ("11_corruption_map_idle.png",
+                 "19_widget_0of4_energy50.png",
+                 "20_map_energy42.png"):
+        assert vis.on_game_view(_ref(name)) is True, name
+
+def test_on_game_view_false_under_modal_dialog():
+    """Игра блюрит фон под модалкой -> якорь не протекает сквозь чужой экран
+    (замер: 0.544 против 0.820 у самого слабого игрового кадра)."""
+    vis = Vision(Config(), reader=None)
+    assert vis.on_game_view(_ref("21_network_lost_dialog.png")) is False
+
+def test_classify_screen_returns_unknown_for_network_lost_dialog():
+    vis = Vision(Config(), reader=None)
+    assert vis.classify_screen(_ref("21_network_lost_dialog.png")) == 'unknown'
+
+def test_classify_screen_prefers_topmost_layer():
+    """Окно энергии перекрывает превью -> побеждает окно, а не превью."""
+    class V(Vision):
+        def exit_dialog_open(self, img): return False
+        def energy_window_open(self, img): return True
+        def corruption_screen(self, img): return 'preview'
+    vis = V(Config(), reader=None)
+    assert vis.classify_screen("кадр") == 'energy_window'
+
+def test_classify_screen_prefers_base_view_over_game_view():
+    """HUD энергии в базе тоже виден (замер 0.911). Если бы game_view
+    проверялся раньше, сторож сказал бы «всё в порядке», а движок ударил бы
+    по лупе вслепую."""
+    vis = Vision(Config(), reader=None)
+    assert vis.classify_screen(_ref("29_base_view.png")) == 'base_view'
+
+# --- Якорь экрана базы (кнопка «Мир») ---
+
+def test_on_base_view_true_for_base_frame():
+    vis = Vision(Config(), reader=None)
+    assert vis.on_base_view(_ref("29_base_view.png")) is True
+
+def test_on_base_view_false_on_world_map():
+    """На карте на месте «Мир» кнопка дома — якорь не должен путать их."""
+    vis = Vision(Config(), reader=None)
+    assert vis.on_base_view(_ref("11_corruption_map_idle.png")) is False
+
+def test_on_base_view_false_on_every_non_base_reference_frame():
+    """Замер: база 1.00, все прочие кадры <= 0.27. Тест держит этот разрыв —
+    если кто-то уронит порог, он тут же покраснеет."""
+    vis = Vision(Config(), reader=None)
+    for name in sorted(os.listdir("reference")):
+        if not name.endswith(".png") or name.startswith("29_"):
+            continue
+        img = _ref(name)
+        if img is None or img.shape[:2] != (1920, 1080):
+            continue          # кропы виджетов, а не полные экраны
+        assert vis.on_base_view(img) is False, name
+
 def test_active_squads_reads_one_from_widget():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))
@@ -281,3 +340,19 @@ def test_exit_dialog_open_false_on_map_and_other_dialogs():
     assert v.exit_dialog_open(_ref("11_corruption_map_idle.png")) is False
     assert v.exit_dialog_open(_ref("13_corruption_dialog.png")) is False
     assert v.exit_dialog_open(_ref("21_network_lost_dialog.png")) is False
+
+# --- Box: кнопка со своим размером ---
+
+def test_find_button_returns_box_with_template_size(tmp_path):
+    """Размер кнопки уже известен из шаблона — раньше он выбрасывался."""
+    tpl = np.zeros((30, 80, 3), np.uint8)
+    tpl[5:25, 10:70] = (40, 200, 255)
+    cv2.imwrite(str(tmp_path / "btn.png"), tpl)
+    img = np.zeros((400, 600, 3), np.uint8)
+    img[50:80, 100:180] = tpl
+    vis = Vision(Config(templates_dir=str(tmp_path)), reader=None)
+
+    box = vis.find_button(img, "btn")
+
+    assert (box.x, box.y) == (140, 65)      # центр совпадает со старым поведением
+    assert (box.w, box.h) == (80, 30)
