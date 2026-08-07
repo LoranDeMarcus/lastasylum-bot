@@ -81,6 +81,42 @@ def test_on_world_map_false_on_blank():
 def _ref(name):
     return cv2.imread(os.path.join("reference", name))
 
+# --- Якорь «мы в игре» (HUD энергии) и классификация экрана ---
+
+def test_on_game_view_true_for_game_frames_regardless_of_energy_value():
+    """Якорь — иконка молнии, а не цифры: 81 / 50 / 42 на разных кадрах."""
+    vis = Vision(Config(), reader=None)
+    for name in ("11_corruption_map_idle.png",
+                 "19_widget_0of4_energy50.png",
+                 "20_map_energy42.png"):
+        assert vis.on_game_view(_ref(name)) is True, name
+
+def test_on_game_view_false_under_modal_dialog():
+    """Игра блюрит фон под модалкой -> якорь не протекает сквозь чужой экран
+    (замер: 0.544 против 0.820 у самого слабого игрового кадра)."""
+    vis = Vision(Config(), reader=None)
+    assert vis.on_game_view(_ref("21_network_lost_dialog.png")) is False
+
+def test_classify_screen_returns_unknown_for_network_lost_dialog():
+    vis = Vision(Config(), reader=None)
+    assert vis.classify_screen(_ref("21_network_lost_dialog.png")) == 'unknown'
+
+def test_classify_screen_prefers_topmost_layer():
+    """Окно энергии перекрывает превью -> побеждает окно, а не превью."""
+    class V(Vision):
+        def exit_dialog_open(self, img): return False
+        def energy_window_open(self, img): return True
+        def corruption_screen(self, img): return 'preview'
+    vis = V(Config(), reader=None)
+    assert vis.classify_screen("кадр") == 'energy_window'
+
+def test_classify_screen_prefers_base_view_over_game_view():
+    """HUD энергии в базе тоже виден (замер 0.911). Если бы game_view
+    проверялся раньше, сторож сказал бы «всё в порядке», а движок ударил бы
+    по лупе вслепую."""
+    vis = Vision(Config(), reader=None)
+    assert vis.classify_screen(_ref("29_base_view.png")) == 'base_view'
+
 # --- Якорь экрана базы (кнопка «Мир») ---
 
 def test_on_base_view_true_for_base_frame():

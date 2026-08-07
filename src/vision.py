@@ -161,6 +161,49 @@ class Vision:
         score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
         return score >= self.cfg.worldmap_threshold
 
+    def on_game_view(self, img):
+        """Мы в игре на игровом виде — при ЛЮБОМ зуме.
+
+        Якорь — иконка молнии в HUD энергии (не цифры: они меняются).
+        Нужен отдельно от on_world_map, потому что в режиме скверны камера
+        часто стоит в зум-ине после follow-cam, а легенды карты там нет —
+        без этого якоря сторож считал бы нормальную работу аномалией.
+
+        Под модальными диалогами игра блюрит фон, поэтому сквозь чужой экран
+        якорь не протекает. Замер по референс-кадрам: игровые виды
+        0.820…1.000, модалки 0.519/0.544 -> порог 0.7 посреди разрыва."""
+        x, y, w, h = self.cfg.hud_energy_region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl("hud_energy")
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return False
+        score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+        return score >= self.cfg.hud_energy_threshold
+
+    def classify_screen(self, img):
+        """Что сейчас на экране — один ответ вместо россыпи предикатов.
+
+        Порядок сверху вниз по слоям: сначала то, что перекрывает остальное,
+        иначе окно энергии поверх превью опозналось бы как превью.
+
+        base_view проверяется РАНЬШЕ game_view: HUD энергии в базе тоже виден
+        (замер 0.911), и якорь «мы в игре» сказал бы «всё нормально» — а
+        дальше по флоу идёт слепой тап по лупе."""
+        if self.exit_dialog_open(img):
+            return 'exit_dialog'
+        if self.energy_window_open(img):
+            return 'energy_window'
+        screen = self.corruption_screen(img)
+        if screen is not None:
+            return screen
+        if self.on_world_map(img):
+            return 'world_map'
+        if self.on_base_view(img):
+            return 'base_view'
+        if self.on_game_view(img):
+            return 'game_view'
+        return 'unknown'
+
     def on_base_view(self, img):
         """Мы в базе (не на карте мира).
 
