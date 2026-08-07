@@ -104,8 +104,11 @@ class FakeCorruption:
                 self._stock -= self._spend
         return self.results.pop(0) if self.results else "dispatched"
 
-def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251):
-    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption")
+def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251, fourth=True):
+    # существующие тесты писались, когда бот занимал все четыре отряда ->
+    # по умолчанию в хелпере включаем 4-й, а резерв проверяем отдельными тестами
+    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption",
+                 use_fourth_squad=fourth)
     eng = BotEngine(driver=FakeDriver(), vision=FakeVision(energy=energy, active=active),
                     actions=FakeActions(), cfg=cfg, log=lambda m: None,
                     sleep=lambda s: None, corruption=corruption)
@@ -141,6 +144,18 @@ def test_corruption_waits_when_all_squads_busy():
     eng = _mk_corruption_engine(corr, active=4)
     assert eng.one_iteration() is None
     assert corr.calls == []                  # ни одного захода
+
+def test_corruption_waits_when_fourth_squad_is_reserved():
+    """Три отряда заняты, четвёртый зарезервирован -> ждём, а не шлём."""
+    corr = FakeCorruption()
+    eng = _mk_corruption_engine(corr, active=3, fourth=False)
+    assert eng.one_iteration() is None
+    assert corr.calls == []
+
+def test_corruption_uses_fourth_squad_when_enabled():
+    corr = FakeCorruption(["dispatched"])
+    eng = _mk_corruption_engine(corr, active=3, fourth=True)
+    assert eng.one_iteration().type == "assault_boss"
 
 def test_corruption_dispatches_on_last_free_slot():
     corr = FakeCorruption(["dispatched"])

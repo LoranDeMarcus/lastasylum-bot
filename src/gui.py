@@ -80,6 +80,19 @@ def run_gui(controller, log_queue=None, cfg=None):
 
         tk.Button(row, text="Применить", command=apply_settings).pack(side="left", padx=6)
 
+        squad_row = tk.Frame(root); squad_row.pack(pady=(0, 2))
+        fourth_var = tk.BooleanVar(value=cfg.use_fourth_squad)
+
+        def toggle_fourth():
+            # пишем в cfg сразу, без «Применить»: движок читает cfg каждую
+            # итерацию, значит переключать можно не останавливая бота
+            cfg.use_fourth_squad = bool(fourth_var.get())
+            if log_queue is not None:
+                log_queue.put(f"Отрядов бот занимает максимум: {cfg.squad_limit()}")
+
+        tk.Checkbutton(squad_row, text="Отправлять 4-й отряд",
+                       variable=fourth_var, command=toggle_fourth).pack(side="left")
+
     def request_stop():
         # без этой строки пауза до первой реакции выглядит как «кнопка не работает»
         controller.stop()

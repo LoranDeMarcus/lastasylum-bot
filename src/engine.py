@@ -149,8 +149,9 @@ class BotEngine:
         вида и авто-отзум тут не нужны."""
         img = self.driver.screenshot()
         active = self.vision.active_squads(img)
-        if active >= self.cfg.squad_total:
-            self.log(f"Все отряды заняты ({active}/{self.cfg.squad_total}), ждём.")
+        limit = self.cfg.squad_limit()
+        if active >= limit:
+            self.log(f"Занято {active} из {limit} разрешённых, ждём.")
             self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
             return None
 
@@ -165,7 +166,7 @@ class BotEngine:
             self.log(f"Склянок {self.flasks} <= порога "
                      f"{self.cfg.flask_stop_threshold} — склянки не тратим.")
 
-        self.log(f"[отрядов={active}/{self.cfg.squad_total}] энергия={energy} "
+        self.log(f"[отрядов={active}/{limit}] энергия={energy} "
                  f"склянок={self.flasks}" + (" (+рефилл разрешён)" if refill else "")
                  + " -> штурм скверны")
         if self.cfg.dry_run:

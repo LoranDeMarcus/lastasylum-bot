@@ -143,6 +143,10 @@ class Config:
     # Виджет смещается по вертикали между кадрами -> якорь-слово «Отряд» ищем
     # в полосе, счётчик читаем по фикс. смещению от найденного матча.
     squad_total: int = 4
+    # Занимать ли 4-й отряд. Снято по умолчанию: один отряд остаётся человеку.
+    # Переключается чекбоксом в GUI прямо на ходу — движок читает cfg каждую
+    # итерацию.
+    use_fourth_squad: bool = False
     squad_header_band: tuple = (0, 200, 470, 220)   # (x, y, w, h) полоса поиска якоря
     squad_header_threshold: float = 0.7             # чисто: есть 0.96-1.00, нет 0.14-0.15
     squad_count_offset: tuple = (232, -2, 22, 42)   # (dx, dy, w, h) региона цифры N от матча
@@ -187,6 +191,10 @@ class Config:
     delay_settle_mult: tuple = (1.0, 1.35)   # множитель к откалиброванной паузе
     delay_poll: tuple = (0.3, 0.5)     # интервал опроса в _wait_*
     delay_idle_mult: tuple = (1.0, 1.4)      # множитель к паузе «все отряды заняты»
+
+    def squad_limit(self):
+        """Сколько отрядов бот имеет право занять одновременно."""
+        return self.squad_total if self.use_fourth_squad else self.squad_total - 1
 
     def tap_box(self, name, xy):
         """Бокс для тапа по ФИКСИРОВАННОЙ координате: размер берём по имени

@@ -1,5 +1,11 @@
 import math
+from config import Config
 from src.models import Target, GameState, Action, Box, distance, nearest
+
+def test_squad_limit_reserves_fourth_squad_by_default():
+    """По умолчанию один отряд остаётся человеку."""
+    assert Config().squad_limit() == 3
+    assert Config(use_fourth_squad=True).squad_limit() == 4
 
 def test_distance_euclidean():
     assert distance(0, 0, 3, 4) == 5.0
