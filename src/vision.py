@@ -161,6 +161,22 @@ class Vision:
         score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
         return score >= self.cfg.worldmap_threshold
 
+    def on_base_view(self, img):
+        """Мы в базе (не на карте мира).
+
+        Якорь — сама кнопка «Мир» в правом нижнем углу: на карте мира на её
+        месте стоит кнопка дома, поэтому спутать их нельзя. Ищем в узкой
+        полосе угла, как worldmap_legend: это режет ложные матчи.
+
+        Замер по референс-кадрам: база 1.00, все прочие 28 кадров <= 0.27."""
+        x, y, w, h = self.cfg.world_button_region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl("world_button")
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return False
+        score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+        return score >= self.cfg.world_button_threshold
+
     def win_prediction(self, img):
         """Прогноз боя из превью отправки: 'win' («Лёгкая победа») |
         'lose' («Без шансов на победу») | None (не распознан). Ищем шаблоны

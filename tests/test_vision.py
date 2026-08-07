@@ -81,6 +81,29 @@ def test_on_world_map_false_on_blank():
 def _ref(name):
     return cv2.imread(os.path.join("reference", name))
 
+# --- Якорь экрана базы (кнопка «Мир») ---
+
+def test_on_base_view_true_for_base_frame():
+    vis = Vision(Config(), reader=None)
+    assert vis.on_base_view(_ref("29_base_view.png")) is True
+
+def test_on_base_view_false_on_world_map():
+    """На карте на месте «Мир» кнопка дома — якорь не должен путать их."""
+    vis = Vision(Config(), reader=None)
+    assert vis.on_base_view(_ref("11_corruption_map_idle.png")) is False
+
+def test_on_base_view_false_on_every_non_base_reference_frame():
+    """Замер: база 1.00, все прочие кадры <= 0.27. Тест держит этот разрыв —
+    если кто-то уронит порог, он тут же покраснеет."""
+    vis = Vision(Config(), reader=None)
+    for name in sorted(os.listdir("reference")):
+        if not name.endswith(".png") or name.startswith("29_"):
+            continue
+        img = _ref(name)
+        if img is None or img.shape[:2] != (1920, 1080):
+            continue          # кропы виджетов, а не полные экраны
+        assert vis.on_base_view(img) is False, name
+
 def test_active_squads_reads_one_from_widget():
     cfg = Config()
     v = Vision(cfg, TemplateReader(cfg))
