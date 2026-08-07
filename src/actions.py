@@ -1,4 +1,5 @@
 import time
+from src.cancel import Cancel
 from src.human import Human
 
 class Actions:
@@ -10,7 +11,8 @@ class Actions:
     Промах по иконке ЗУМИТ карту (панель не появляется) -> open_target_panel
     вернёт None, вызывающий должен восстановить вид и пере-детектить."""
 
-    def __init__(self, driver, vision, cfg, log=print, sleep=time.sleep, human=None):
+    def __init__(self, driver, vision, cfg, log=print, sleep=time.sleep, human=None,
+                 cancel=None):
         self.driver = driver
         self.vision = vision
         self.cfg = cfg
@@ -19,6 +21,9 @@ class Actions:
         # если human не передан — свой, но спящий через тот же sleep (тесты
         # подсовывают фейковый sleep и должны видеть паузы именно там)
         self.human = human if human is not None else Human(cfg, sleep=sleep)
+        # cancel всегда объект, а не None: точки проверки во флоу читаются
+        # как `if self.cancel.stopped()`, без проверок на None в каждой
+        self.cancel = cancel if cancel is not None else Cancel()
         self.last_flasks = None   # последнее прочитанное «В наличии: N» (движок берёт отсюда)
 
     def wait_for(self, name, timeout_s=8.0, poll_s=0.4):

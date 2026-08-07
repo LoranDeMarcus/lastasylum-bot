@@ -3,6 +3,7 @@ import os
 import time
 import traceback
 from src.models import GameState, Action, nearest
+from src.cancel import Cancel
 from src.decide import decide
 from src.human import Human
 
@@ -15,7 +16,7 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None, human=None):
+                 corruption=None, human=None, cancel=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
@@ -25,6 +26,9 @@ class BotEngine:
         # если human не передан — свой, но спящий через тот же sleep (тесты
         # подсовывают фейковый sleep и должны видеть паузы именно там)
         self.human = human if human is not None else Human(cfg, sleep=sleep)
+        # cancel всегда объект, а не None: точки проверки читаются
+        # как `if self.cancel.stopped()`, без проверок на None в каждой
+        self.cancel = cancel if cancel is not None else Cancel()
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем

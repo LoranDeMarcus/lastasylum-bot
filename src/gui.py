@@ -1,12 +1,16 @@
 # src/gui.py
 import queue
 import threading
+from src.cancel import Cancel
 
 class BotController:
+    """Владелец отмены: один Cancel уходит и в фабрику (там на нём строятся
+    все паузы), и в поток движка (там он обычный stop_event)."""
+
     def __init__(self, engine_factory):
         self._factory = engine_factory
         self._thread = None
-        self._stop = threading.Event()
+        self._cancel = Cancel()
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -14,13 +18,13 @@ class BotController:
     def start(self):
         if self.is_running():
             return
-        self._stop.clear()
-        engine = self._factory()
-        self._thread = threading.Thread(target=engine.run, args=(self._stop,), daemon=True)
+        self._cancel.clear()
+        engine = self._factory(self._cancel)
+        self._thread = threading.Thread(target=engine.run, args=(self._cancel,), daemon=True)
         self._thread.start()
 
     def stop(self):
-        self._stop.set()
+        self._cancel.set()
 
 def apply_flask_count(cfg, raw):
     """Применить введённый в GUI текущий остаток склянок. Его приходится
@@ -94,9 +98,15 @@ def run_gui(controller, log_queue=None, cfg=None):
 
         tk.Button(row, text="Применить", command=apply_settings).pack(side="left", padx=6)
 
+    def request_stop():
+        # без этой строки пауза до первой реакции выглядит как «кнопка не работает»
+        controller.stop()
+        if log_queue is not None:
+            log_queue.put("Стоп запрошен — доигрываю текущий шаг.")
+
     btns = tk.Frame(root); btns.pack(pady=6)
     tk.Button(btns, text="Start", width=12,
               command=controller.start).pack(side="left", padx=6)
     tk.Button(btns, text="Stop", width=12,
-              command=controller.stop).pack(side="left", padx=6)
+              command=request_stop).pack(side="left", padx=6)
     root.mainloop()

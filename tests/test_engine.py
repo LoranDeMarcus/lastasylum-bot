@@ -1,6 +1,8 @@
 # tests/test_engine.py
 import threading
+import time
 from config import Config
+from src.cancel import Cancel
 from src.models import GameState, Target
 from src.engine import BotEngine
 
@@ -109,6 +111,24 @@ def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251):
                     sleep=lambda s: None, corruption=corruption)
     eng.flasks = flasks
     return eng
+
+def test_idle_wait_wakes_up_on_stop():
+    """Ожидание «все отряды заняты» — самая длинная пауза бота (10-14 с).
+    Стоп должен будить из неё, а не только между итерациями.
+
+    Отмена взводится ИЗ ТАЙМЕРА, а не заранее: заранее взведённая отмена
+    развернула бы итерацию ещё на входе, и тест перестал бы проверять
+    пробуждение из паузы."""
+    cancel = Cancel()
+    cfg = Config(screen_w=900, screen_h=1600, strategy="corruption")
+    eng = BotEngine(driver=FakeDriver(), vision=FakeVision(active=4),
+                    actions=FakeActions(), cfg=cfg, log=lambda m: None,
+                    sleep=cancel.sleep, corruption=FakeCorruption(), cancel=cancel)
+    eng.flasks = 251
+    threading.Timer(0.1, cancel.set).start()
+    t0 = time.perf_counter()
+    assert eng.one_iteration() is None
+    assert time.perf_counter() - t0 < 2.0      # а не corruption_poll_interval_s = 10 с
 
 def test_corruption_dispatches_when_squad_free():
     corr = FakeCorruption(["dispatched"])

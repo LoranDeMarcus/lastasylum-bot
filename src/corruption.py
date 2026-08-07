@@ -1,5 +1,6 @@
 # src/corruption.py
 import time
+from src.cancel import Cancel
 from src.human import Human
 
 class CorruptionActions:
@@ -12,7 +13,8 @@ class CorruptionActions:
     подтверждается шаблоном; не подтвердился -> BACK и заход провален
     (вызывающий считает провалы и после N подряд зовёт человека)."""
 
-    def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep, human=None):
+    def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
+                 human=None, cancel=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions        # энергоокно/склянки переиспользуем
@@ -22,6 +24,9 @@ class CorruptionActions:
         # если human не передан — свой, но спящий через тот же sleep (тесты
         # подсовывают фейковый sleep и должны видеть паузы именно там)
         self.human = human if human is not None else Human(cfg, sleep=sleep)
+        # cancel всегда объект, а не None: точки проверки во флоу читаются
+        # как `if self.cancel.stopped()`, без проверок на None в каждой
+        self.cancel = cancel if cancel is not None else Cancel()
         self.flasks_used = 0          # сколько склянок потрачено за сессию
         self.last_flask_stock = None  # «В наличии: N», прочитанное после применения
 
