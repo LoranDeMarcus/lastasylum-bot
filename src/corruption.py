@@ -2,6 +2,7 @@
 import time
 from src.cancel import Cancel
 from src.human import Human
+from src.watchdog import safe_back
 
 class CorruptionActions:
     """Режим «Элитная скверна» (проверено вживую, reference/13..18):
@@ -57,17 +58,9 @@ class CorruptionActions:
         return False
 
     def _safe_back(self):
-        """Системная «назад» + страховка. На ЧИСТОЙ карте «назад» открывает
-        «Выйти из игры?» — если это проглядеть, следующий слепой тап может
-        подтвердить выход. Поэтому сразу проверяем и жмём «Отмена»."""
-        self.driver.back()
-        self.human.after_tap(0.6)
-        img = self.driver.screenshot()
-        if self.vision.exit_dialog_open(img):
-            pos = self.vision.find_button(img, "exit_cancel")
-            self.log("  открылся диалог выхода из игры -> Отмена")
-            self.driver.tap(pos if pos is not None else self.cfg.tap_box("exit_cancel", self.cfg.exit_cancel_xy))
-            self.human.after_tap(0.6)
+        # логика одна на весь проект (нужна и сторожу) -> живёт в watchdog
+        safe_back(self.driver, self.vision, self.cfg, log=self.log,
+                  sleep=self.sleep, human=self.human)
 
     def _abort(self, why):
         """Шаг не подтвердился: закрываем то, что открылось, чтобы следующая
