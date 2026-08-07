@@ -4,6 +4,7 @@ import time
 import traceback
 from src.models import GameState, Action, nearest
 from src.decide import decide
+from src.human import Human
 
 class BotEngine:
     """Цикл фарма. Один отряд-на-задачу за раз (v1 последовательный):
@@ -14,13 +15,16 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None):
+                 corruption=None, human=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
+        # если human не передан — свой, но спящий через тот же sleep (тесты
+        # подсовывают фейковый sleep и должны видеть паузы именно там)
+        self.human = human if human is not None else Human(cfg, sleep=sleep)
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
@@ -93,7 +97,7 @@ class BotEngine:
         squad = self.vision.squad_state(img)
         if not self._squad_ready(squad):
             self.log(f"Отряд занят ({squad}), ждём.")
-            self.sleep(2.0)
+            self.sleep(self.human.idle_s(2.0))
             return None
 
         energy = self.vision.read_energy(img)
@@ -143,7 +147,7 @@ class BotEngine:
         active = self.vision.active_squads(img)
         if active >= self.cfg.squad_total:
             self.log(f"Все отряды заняты ({active}/{self.cfg.squad_total}), ждём.")
-            self.sleep(self.cfg.corruption_poll_interval_s)
+            self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
             return None
 
         energy = self.vision.read_energy(img)
@@ -211,10 +215,10 @@ class BotEngine:
                 self._offmap_pinches += 1
                 self.log(f"Не на карте — авто-отзум щипком ({self._offmap_pinches}/{self.cfg.max_pinch_recover}).")
                 self.driver.zoom_out()
-                self.sleep(1.5)
+                self.human.after_tap(1.5)
             else:
                 self.log("Не на карте и щипок не помог (меню?) — жду человека.")
-                self.sleep(2.0)
+                self.sleep(self.human.idle_s(2.0))
             return None
         self._offmap_pinches = 0     # снова на карте -> сброс счётчика
 
@@ -224,7 +228,7 @@ class BotEngine:
         # отряд в походе и слать рано -> ждём
         if not self._squad_ready(squad):
             self.log(f"Отряд занят ({squad}), ждём.")
-            self.sleep(2.0)
+            self.sleep(self.human.idle_s(2.0))
             return None
 
         # исключаем непроходимых боссов, помеченных ранее
@@ -285,4 +289,4 @@ class BotEngine:
                 return 'error'
             if action is not None and action.type == 'stop' and not self.cfg.dry_run:
                 return 'stop'
-            self.sleep(0.5)
+            self.sleep(self.human.idle_s(0.5))

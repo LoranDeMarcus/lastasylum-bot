@@ -1,5 +1,7 @@
+import random
 from config import Config
 from src.corruption import CorruptionActions
+from src.human import Human
 
 class FakeDriver:
     """Кадры выдаются по очереди; последний повторяется."""
@@ -332,3 +334,16 @@ def test_verdict_gate_on_dispatches_on_win():
     _, res = _run(drv, vis, acts, cfg)
     assert res == "dispatched"
     assert acts.closed == 0
+
+def test_pauses_never_shorter_than_calibrated_values():
+    """Человечные паузы только растягивают откалиброванные ожидания."""
+    cfg = Config()
+    drv, vis, acts = _happy()          # хелпер файла, возвращает три значения
+    slept = []
+    human = Human(cfg, rng=random.Random(11), sleep=slept.append)
+    c = CorruptionActions(drv, vis, acts, cfg, log=lambda *_: None,
+                          sleep=slept.append, human=human)
+    c.run_once()
+    assert slept, "паузы должны быть"
+    assert min(slept) >= 0.3          # ни одна пауза не короче самой мелкой базовой
+    assert len(set(slept)) > 3        # и они не одинаковые

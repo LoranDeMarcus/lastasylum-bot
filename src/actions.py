@@ -1,4 +1,5 @@
 import time
+from src.human import Human
 
 class Actions:
     """Реальные действия в UI. Флоу (проверено вживую, reference/*.png):
@@ -9,12 +10,15 @@ class Actions:
     Промах по иконке ЗУМИТ карту (панель не появляется) -> open_target_panel
     вернёт None, вызывающий должен восстановить вид и пере-детектить."""
 
-    def __init__(self, driver, vision, cfg, log=print, sleep=time.sleep):
+    def __init__(self, driver, vision, cfg, log=print, sleep=time.sleep, human=None):
         self.driver = driver
         self.vision = vision
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
+        # если human не передан — свой, но спящий через тот же sleep (тесты
+        # подсовывают фейковый sleep и должны видеть паузы именно там)
+        self.human = human if human is not None else Human(cfg, sleep=sleep)
         self.last_flasks = None   # последнее прочитанное «В наличии: N» (движок берёт отсюда)
 
     def wait_for(self, name, timeout_s=8.0, poll_s=0.4):
@@ -22,7 +26,7 @@ class Actions:
             pos = self.vision.find_button(self.driver.screenshot(), name)
             if pos is not None:
                 return pos
-            self.sleep(poll_s)
+            self.sleep(self.human.poll_s(poll_s))
         return None
 
     def _poll_panel(self):
@@ -31,7 +35,7 @@ class Actions:
             act = self.vision.panel_action(self.driver.screenshot())
             if act is not None:
                 return act
-            self.sleep(0.3)
+            self.sleep(self.human.poll_s(0.3))
         return None
 
     def open_target_panel(self, target):
@@ -60,7 +64,7 @@ class Actions:
     def _select_squad(self, squad_n):
         sx, sy = self.vision.squad_slot(squad_n)
         self.driver.tap(self.cfg.tap_box("squad_slot", (sx, sy)))
-        self.sleep(0.4)
+        self.human.after_tap(0.4)
 
     def close_preview(self):
         """Закрыть превью/панель без отправки (тап по затемнённой области)."""
@@ -97,16 +101,16 @@ class Actions:
         """«Особое событие» -> «Поиск вора» -> «Поиск» -> тап найденного моба
         (центрируется у базы -> короткий марш). Возвращает 'attack' если
         открылась панель моба, иначе None. Координаты — фикс. вёрстка диалога."""
-        self.driver.tap(self.cfg.tap_box("event_button", self.cfg.event_button_xy));           self.sleep(1.2)
-        self.driver.tap(self.cfg.tap_box("search_thief_tab", self.cfg.search_thief_tab_xy));   self.sleep(0.6)
-        self.driver.tap(self.cfg.tap_box("search_button", self.cfg.search_button_xy));         self.sleep(1.6)
-        self.driver.tap(self.cfg.tap_box("target", self.cfg.search_result_xy));                self.sleep(1.0)
+        self.driver.tap(self.cfg.tap_box("event_button", self.cfg.event_button_xy));           self.human.after_tap(1.2)
+        self.driver.tap(self.cfg.tap_box("search_thief_tab", self.cfg.search_thief_tab_xy));   self.human.after_tap(0.6)
+        self.driver.tap(self.cfg.tap_box("search_button", self.cfg.search_button_xy));         self.human.after_tap(1.6)
+        self.driver.tap(self.cfg.tap_box("target", self.cfg.search_result_xy));                self.human.after_tap(1.0)
         act = self.vision.panel_action(self.driver.screenshot())
         if act is None:
             # диалог события мог остаться открытым (вора нет / вёрстка иная) —
             # закрываем BACK'ом, иначе следующая итерация тапает по меню вслепую
             self.driver.back()
-            self.sleep(0.6)
+            self.human.after_tap(0.6)
         return act
 
     def search_and_attack_mob(self, refill=False, want_flasks=False):
@@ -170,7 +174,7 @@ class Actions:
             return None
         if use_flask:
             self.driver.tap(self.cfg.tap_box("flask_use", self.cfg.flask_use_xy))   # фиолетовая +50 (фикс. координата)
-            self.sleep(0.4)
+            self.human.after_tap(0.4)
         n = self.vision.read_flasks(self.driver.screenshot())
         self._close_energy()
         self.last_flasks = n
