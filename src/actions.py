@@ -28,6 +28,8 @@ class Actions:
 
     def wait_for(self, name, timeout_s=8.0, poll_s=0.4):
         for _ in range(max(1, int(timeout_s / poll_s))):
+            if self.cancel.stopped():
+                return None          # докручивать таймаут после Стопа незачем
             pos = self.vision.find_button(self.driver.screenshot(), name)
             if pos is not None:
                 return pos
@@ -37,6 +39,8 @@ class Actions:
     def _poll_panel(self):
         deadline = max(1, int(self.cfg.panel_verify_timeout_s / 0.3))
         for _ in range(deadline):
+            if self.cancel.stopped():
+                return None
             act = self.vision.panel_action(self.driver.screenshot())
             if act is not None:
                 return act

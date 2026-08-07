@@ -174,6 +174,10 @@ class BotEngine:
 
         used_before = self.corruption.flasks_used
         res = self.corruption.run_once(refill=refill)
+        if res == 'stopped':
+            # остановка по кнопке — не провал бота, счётчик провалов не трогаем
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
         self.log(f"  Штурм скверны -> {res}")
         spent = self.corruption.flasks_used - used_before
         if self.corruption.last_flask_stock is not None:
@@ -203,6 +207,9 @@ class BotEngine:
         return Action('assault_boss')
 
     def one_iteration(self):
+        # Стоп мог прийти, пока движок спал между итерациями
+        if self.cancel.stopped():
+            return Action('stop')
         if self.cfg.strategy == "corruption":
             return self._corruption_iteration()
         if self.cfg.use_search_strategy:

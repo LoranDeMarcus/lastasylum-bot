@@ -213,6 +213,24 @@ def test_corruption_failure_counter_resets_on_success():
         action = eng.one_iteration()
     assert action.type == "assault_boss"     # 3 подряд не набралось -> не стоп
 
+def test_corruption_stopped_result_stops_engine_without_counting_failure():
+    """'stopped' — не провал: человек сам нажал кнопку."""
+    corr = FakeCorruption(["stopped"])
+    eng = _mk_corruption_engine(corr, active=1)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._no_progress == 0
+
+def test_iteration_returns_stop_when_cancelled_before_start():
+    corr = FakeCorruption()
+    cancel = Cancel()
+    cancel.set()
+    eng = _mk_corruption_engine(corr, active=0)
+    eng.cancel = cancel
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert corr.calls == []            # до штурма не дошло
+
 def test_corruption_dry_run_does_not_act():
     corr = FakeCorruption()
     eng = _mk_corruption_engine(corr)
