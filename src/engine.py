@@ -16,7 +16,7 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None, human=None, cancel=None):
+                 corruption=None, human=None, cancel=None, watchdog=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
@@ -30,6 +30,7 @@ class BotEngine:
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
+        self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
@@ -147,6 +148,14 @@ class BotEngine:
 
         Тапа по карте нет (панель босса открывает сам «Поиск»), поэтому guard
         вида и авто-отзум тут не нужны."""
+        # Сторож ПЕРЕД всем остальным: дальше идёт слепой тап по лупе
+        # (78,1530), и если под ней не игра, а чужой экран — тап уйдёт мимо.
+        if self.watchdog is not None:
+            verdict = self.watchdog.check()
+            if verdict == 'stop':
+                return Action('stop')
+            if verdict == 'recovered':
+                return None
         img = self.driver.screenshot()
         active = self.vision.active_squads(img)
         limit = self.cfg.squad_limit()

@@ -115,6 +115,33 @@ def _mk_corruption_engine(corruption, active=0, energy=80, flasks=251, fourth=Tr
     eng.flasks = flasks
     return eng
 
+class FakeWatchdog:
+    def __init__(self, verdicts):
+        self.verdicts = list(verdicts)
+        self.calls = 0
+    def check(self):
+        self.calls += 1
+        return self.verdicts.pop(0) if self.verdicts else 'ok'
+
+class _NoopCorruption:
+    """Штурма быть не должно: сторож обязан развернуть итерацию раньше."""
+    flasks_used = 0
+    last_flask_stock = None
+    def run_once(self, refill=False):
+        raise AssertionError("движок не должен доходить до штурма")
+
+def test_corruption_iteration_stops_on_watchdog_verdict():
+    eng = _mk_corruption_engine(_NoopCorruption())
+    eng.watchdog = FakeWatchdog(['stop'])
+    action = eng.one_iteration()
+    assert action is not None and action.type == 'stop'
+
+def test_corruption_iteration_skips_turn_after_recovery():
+    """recovered -> итерация начинается заново со свежего кадра, не тапая."""
+    eng = _mk_corruption_engine(_NoopCorruption())
+    eng.watchdog = FakeWatchdog(['recovered'])
+    assert eng.one_iteration() is None
+
 def test_idle_wait_wakes_up_on_stop():
     """Ожидание «все отряды заняты» — самая длинная пауза бота (10-14 с).
     Стоп должен будить из неё, а не только между итерациями.
