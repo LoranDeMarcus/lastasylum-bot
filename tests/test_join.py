@@ -42,14 +42,21 @@ class FakeVision:
     def exit_dialog_open(self, img):
         return False
 
+class FakeActions:
+    """Минимальный фейк Actions: JoinActions трогает только close_preview()."""
+    def __init__(self):
+        self.closed = 0
+    def close_preview(self):
+        self.closed += 1
+
 def _cfg():
     cfg = Config()
     cfg.human_enabled = False        # без случайных пауз тест детерминирован
     return cfg
 
-def _join(frames, vision, cfg=None):
+def _join(frames, vision, cfg=None, actions=None):
     cfg = cfg or _cfg()
-    return JoinActions(FakeDriver(frames), vision, None, cfg,
+    return JoinActions(FakeDriver(frames), vision, actions, cfg,
                        log=lambda *_: None, sleep=lambda *_: None,
                        cancel=Cancel()), frames
 
@@ -147,3 +154,66 @@ def test_taps_refresh_when_it_appears():
     actions, _ = _join(OPEN + ['list', 'fresh', 'preview'], vision)
     assert actions.run_once() == 'dispatched'
     assert (548, 1800) in actions.driver.taps         # «Обновить» нажата
+
+def test_run_once_makes_no_taps_when_already_stopped():
+    """Стоп нажат до захода — ни одного тапа."""
+    vision = FakeVision({'a': None})
+    cancel = Cancel()
+    cancel.set()
+    actions = JoinActions(FakeDriver(['a']), vision, None, _cfg(),
+                          log=lambda *_: None, sleep=lambda *_: None, cancel=cancel)
+    assert actions.run_once() == 'stopped'
+    assert actions.driver.taps == []
+
+def test_wait_loops_give_up_on_stop():
+    """Цикл ожидания экрана не должен докручивать таймаут после Стопа."""
+    vision = FakeVision({})
+    cancel = Cancel()
+    cancel.set()
+    actions = JoinActions(FakeDriver(['чужое']), vision, None, _cfg(),
+                          log=lambda *_: None, sleep=lambda *_: None, cancel=cancel)
+    assert actions._wait_any({'list'}) is None
+    assert actions.driver.i <= 1          # максимум один кадр, а не весь таймаут
+
+def test_run_once_stops_while_idling_for_cards():
+    """Стоп приходит в СЕРЕДИНЕ ожидания в окне: подходящих карточек ещё нет,
+    список ждём бесконечно (без Стопа этот цикл не ограничен по времени) —
+    Стоп обязан прервать его на ближайшей итерации, без лишних тапов."""
+    vision = FakeVision(
+        screen_by_frame={'list': 'list'},
+        cards_by_frame={'list': []},          # карточек нет -> сидим в idle-паузе
+    )
+    cancel = Cancel()
+    sleeps = []
+    def fake_sleep(v):
+        sleeps.append(v)
+        if len(sleeps) == 3:                  # ровно idle-пауза внутри окна
+            cancel.set()
+    drv = FakeDriver(OPEN + ['list'])
+    actions = JoinActions(drv, vision, None, _cfg(), log=lambda *_: None,
+                          sleep=fake_sleep, cancel=cancel)
+    assert actions.run_once() == 'stopped'
+    assert drv.taps == [(986, 1089), (884, 188)]     # икона + вкладка, дальше ни тапа
+    assert drv.backs == 0                             # прибираться незачем
+
+def test_run_once_fails_and_backs_when_dialog_missing():
+    """Окно сборов не открылось после тапа по иконке -> BACK, провал."""
+    vision = FakeVision(screen_by_frame={})
+    actions, _ = _join(['map'], vision)
+    assert actions.run_once() == 'failed'
+    assert actions.driver.backs == 1
+
+def test_run_once_reports_low_energy_and_closes_preview():
+    """Энергии меньше стоимости отряда -> игра подменяет «Отправиться» на
+    «Увеличить энергию». Выходим чисто, без тапов по окну энергии и без BACK."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'lowe': 'preview_low_energy'},
+        cards_by_frame={'list': [card]},
+    )
+    acts = FakeActions()
+    actions, _ = _join(OPEN + ['list', 'lowe'], vision, actions=acts)
+    assert actions.run_once() == 'low_energy'
+    assert acts.closed == 1                       # превью закрыто
+    assert (900, 420) in actions.driver.taps       # тап по слоту всё же был
+    assert actions.driver.backs == 0               # BACK не нужен, вышли штатно
