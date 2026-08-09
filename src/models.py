@@ -44,6 +44,18 @@ class Box:
     def at(cls, xy, size):
         return cls(int(xy[0]), int(xy[1]), int(size[0]), int(size[1]))
 
+@dataclass(frozen=True)
+class JoinCard:
+    """Карточка чужого сбора в окне «Война альянсов».
+
+    y — вертикаль якоря «Элитная скверна»; slots — свободные слоты слева
+    направо (тапаем последний, самый правый: слоты заполняются слева, значит
+    правый с наибольшей вероятностью ещё свободен); seconds — сколько осталось
+    до выхода отряда, None если таймер не прочитался."""
+    y: int
+    slots: list
+    seconds: Optional[int] = None
+
 def distance(ax: int, ay: int, bx: int, by: int) -> float:
     return math.hypot(ax - bx, ay - by)
 
