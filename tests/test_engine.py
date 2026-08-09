@@ -565,3 +565,67 @@ def test_run_returns_error_on_start_exception():
     reason = eng.run(threading.Event())
     assert reason == 'error'
     assert any('no OCR' in m for m in logs)
+
+# --- Режим «присоединяться к чужим штурмам» ---
+
+class FakeJoin:
+    def __init__(self, results=(), spend=0, stock=None):
+        self.results = list(results)
+        self.calls = []
+        self.flasks_used = 0
+        self.last_flask_stock = None
+        self._spend = spend
+        self._stock = stock
+    def run_once(self, refill=False):
+        self.calls.append(refill)
+        if refill:
+            self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+        return self.results.pop(0) if self.results else "dispatched"
+
+def _mk_join_engine(join, active=0, energy=80, flasks=251, fourth=True):
+    cfg = Config(screen_w=900, screen_h=1600, strategy="join",
+                 use_fourth_squad=fourth)
+    eng = BotEngine(driver=FakeDriver(), vision=FakeVision(energy=energy, active=active),
+                    actions=FakeActions(), cfg=cfg, log=lambda m: None,
+                    sleep=lambda s: None, join=join)
+    eng.flasks = flasks
+    return eng
+
+def test_join_waits_when_all_squads_busy():
+    join = FakeJoin(["dispatched"])
+    eng = _mk_join_engine(join, active=4)
+    assert eng.one_iteration() is None
+    assert join.calls == []                 # в окно даже не заходили
+
+def test_join_dispatches_when_slot_free():
+    join = FakeJoin(["dispatched"])
+    eng = _mk_join_engine(join, active=1)
+    assert eng.one_iteration().type == 'join_assault'
+    assert len(join.calls) == 1
+
+def test_join_no_calls_is_not_a_failure():
+    join = FakeJoin(["no_calls"])
+    eng = _mk_join_engine(join)
+    assert eng.one_iteration() is None
+    assert eng._no_progress == 0            # сборов нет — это не провал бота
+
+def test_join_stops_after_repeated_failures():
+    cfg_failures = Config().max_search_failures
+    join = FakeJoin(["failed"] * cfg_failures)
+    eng = _mk_join_engine(join)
+    for _ in range(cfg_failures - 1):
+        assert eng.one_iteration().type == 'join_assault'
+    assert eng.one_iteration().type == 'stop'
+
+def test_join_low_energy_stops():
+    join = FakeJoin(["low_energy"])
+    eng = _mk_join_engine(join)
+    assert eng.one_iteration().type == 'stop'
+
+def test_join_reads_flask_stock_after_refill():
+    join = FakeJoin(["dispatched"], spend=2, stock=249)
+    eng = _mk_join_engine(join, flasks=251)
+    eng.one_iteration()
+    assert eng.flasks == 249                # «В наличии: N» точнее локального учёта

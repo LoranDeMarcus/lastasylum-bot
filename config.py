@@ -106,7 +106,7 @@ class Config:
     max_pinch_recover: int = 3
 
     # --- Режим «Элитная скверна» (штурм боссов через диалог поиска) ---
-    # strategy: "corruption" | "thief" | "map". Оставлено рядом с
+    # strategy: "corruption" | "thief" | "map" | "join". Оставлено рядом с
     # use_search_strategy для обратной совместимости старых раннеров.
     strategy: str = "corruption"
     corruption_search_icon_xy: tuple = (78, 1530)   # лупа в левом столбце -> диалог поиска

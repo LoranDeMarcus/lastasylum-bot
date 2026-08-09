@@ -16,7 +16,7 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None, human=None, cancel=None, watchdog=None):
+                 corruption=None, join=None, human=None, cancel=None, watchdog=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
@@ -30,6 +30,7 @@ class BotEngine:
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
+        self.join = join               # JoinActions для режима «Присоединиться к штурму»
         self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
@@ -220,10 +221,75 @@ class BotEngine:
                 return Action('stop')
         return Action('assault_boss')
 
+    def _join_iteration(self):
+        """Режим «присоединяться к чужим штурмам»: гейт тот же, что у своего
+        штурма (число активных отрядов), но вместо запуска сбора бот ищет чужой.
+
+        Сборов нет — это НЕ провал: просто ждём и пробуем снова. Провалом
+        считается только незнакомый экран/несостоявшийся шаг."""
+        if self.watchdog is not None:
+            verdict = self.watchdog.check()
+            if verdict == 'stop':
+                return Action('stop')
+            if verdict == 'recovered':
+                return None
+        img = self.driver.screenshot()
+        active = self.vision.active_squads(img)
+        limit = self.cfg.squad_limit()
+        if active >= limit:
+            self.log(f"Занято {active} из {limit} разрешённых, ждём.")
+            self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
+            return None
+
+        energy = self.vision.read_energy(img)
+        refill = self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+        self.log(f"[отрядов={active}/{limit}] энергия={energy} склянок={self.flasks}"
+                 + (" (+рефилл разрешён)" if refill else "")
+                 + " -> ищу чужой сбор")
+        if self.cfg.dry_run:
+            self.sleep(1.0)
+            return Action('join_assault')
+
+        used_before = self.join.flasks_used
+        res = self.join.run_once(refill=refill)
+        if res == 'stopped':
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
+        self.log(f"  Присоединение -> {res}")
+
+        spent = self.join.flasks_used - used_before
+        if self.join.last_flask_stock is not None:
+            self.flasks = self.join.last_flask_stock
+        elif spent and self.flasks is not None:
+            self.flasks = max(0, self.flasks - spent)
+        elif spent:
+            self.log("  остаток склянок прочитать не удалось — порог не действует")
+        if spent:
+            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+
+        if res == 'low_energy':
+            self.log("Энергии не хватает — стоп. Пополни энергию и запусти снова.")
+            return Action('stop')
+        if res == 'no_calls':
+            self.log("Сборов сейчас нет, жду.")
+            self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
+            return None
+
+        if res == 'dispatched':
+            self._no_progress = 0
+        else:
+            self._no_progress += 1
+            if self._no_progress >= self.cfg.max_search_failures:
+                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+                return Action('stop')
+        return Action('join_assault')
+
     def one_iteration(self):
         # Стоп мог прийти, пока движок спал между итерациями
         if self.cancel.stopped():
             return Action('stop')
+        if self.cfg.strategy == "join":
+            return self._join_iteration()
         if self.cfg.strategy == "corruption":
             return self._corruption_iteration()
         if self.cfg.use_search_strategy:
