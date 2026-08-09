@@ -130,10 +130,15 @@ def test_on_base_view_false_on_world_map():
 
 def test_on_base_view_false_on_every_non_base_reference_frame():
     """Замер: база 1.00, все прочие кадры <= 0.27. Тест держит этот разрыв —
-    если кто-то уронит порог, он тут же покраснеет."""
+    если кто-то уронит порог, он тут же покраснеет.
+
+    Кадры базы называются со словом «base» в имени (например
+    `29_base_view.png`, `31_join_icon_base.png`) — на них on_base_view
+    законно возвращает True, поэтому такие кадры пропускаем. Любой будущий
+    кадр базы достаточно так назвать, чтобы тест не потребовал правки."""
     vis = Vision(Config(), reader=None)
     for name in sorted(os.listdir("reference")):
-        if not name.endswith(".png") or name.startswith("29_"):
+        if not name.endswith(".png") or "base" in name.lower():
             continue
         img = _ref(name)
         if img is None or img.shape[:2] != (1920, 1080):

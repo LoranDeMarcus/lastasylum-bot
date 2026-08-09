@@ -629,3 +629,16 @@ def test_join_reads_flask_stock_after_refill():
     eng = _mk_join_engine(join, flasks=251)
     eng.one_iteration()
     assert eng.flasks == 249                # «В наличии: N» точнее локального учёта
+
+def test_join_start_leaves_stock_unknown_until_read_from_game():
+    """Как и у «Элитной скверны»: окно энергии видно только с превью
+    отправки, поэтому на старте остаток неизвестен, а лог называет
+    именно режим присоединения (не «Поиск вора» и не голое число)."""
+    lines = []
+    join = FakeJoin()
+    eng = _mk_join_engine(join)
+    eng.flasks = None
+    eng.log = lines.append
+    eng.start()
+    assert eng.flasks is None
+    assert any("присоединение" in m.lower() for m in lines)
