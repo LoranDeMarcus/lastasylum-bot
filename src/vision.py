@@ -351,6 +351,48 @@ class Vision:
         th, tw = tpl.shape[:2]
         return Box(maxloc[0] + tw // 2, maxloc[1] + th // 2, tw, th)
 
+    def find_all(self, img, name, region=None, threshold=None, min_dist=None):
+        """Все совпадения шаблона, а не лучшее (как find_button): карточек и
+        слотов в кадре несколько.
+
+        Соседние пики одного объекта подавляются: matchTemplate даёт кляксу
+        совпадений вокруг каждой находки, без подавления один «+» превратился
+        бы в десяток."""
+        tpl = self._state_tpl(name)
+        if tpl is None:
+            return []
+        x0, y0 = 0, 0
+        area = img
+        if region is not None:
+            x0, y0, w, h = region
+            area = img[y0:y0 + h, x0:x0 + w]
+        th, tw = tpl.shape[:2]
+        if area.shape[0] < th or area.shape[1] < tw:
+            return []
+        thr = self.cfg.template_match_threshold if threshold is None else threshold
+        res = cv2.matchTemplate(area, tpl, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(res >= thr)
+        gap = min_dist if min_dist is not None else max(tw, th) // 2
+        out = []
+        for x, y in sorted(zip(xs, ys), key=lambda p: -res[p[1], p[0]]):
+            cx, cy = x0 + int(x) + tw // 2, y0 + int(y) + th // 2
+            if any(abs(cx - b.x) < gap and abs(cy - b.y) < gap for b in out):
+                continue
+            out.append(Box(cx, cy, tw, th))
+        out.sort(key=lambda b: (b.y, b.x))
+        return out
+
+    def assault_call_icon(self, img):
+        """Красная иконка-череп «кто-то набирает помощников» или None.
+        Видна и на карте, и в базе. Бейдж с числом и таймер в шаблон не
+        входят — они меняются каждую секунду."""
+        return self.find_button(img, "assault_call")
+
+    def refresh_button(self, img):
+        """Жёлтая «Обновить» внизу окна сборов или None. Появляется, только
+        когда список устарел, поэтому её отсутствие — не ошибка."""
+        return self.find_button(img, "join_refresh")
+
     def read_energy(self, img):
         """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,
         поэтому читаем с отсечкой по яркости, а не через Otsu (иначе полоса

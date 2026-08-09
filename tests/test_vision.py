@@ -375,3 +375,61 @@ def test_alliance_war_open_false_on_map():
 def test_classify_screen_knows_join_list():
     v = Vision(Config(), TemplateReader(Config()))
     assert v.classify_screen(_ref("30_alliance_war_empty.png")) == 'join_list'
+
+# --- find_all: все совпадения шаблона, а не только лучшее ---
+#
+# templates/join_slot.png ещё не нарезан — карточку сбора (Vision.join_cards)
+# делает следующая задача, не эта. Для проверки самого механизма find_all
+# годится любой уже существующий маленький шаблон — берём energy_close.png
+# (кнопка X окна энергии, к режиму join отношения не имеет).
+
+def test_find_all_returns_every_match():
+    cfg = Config()
+    v = Vision(cfg, FixedReader(0))
+    # три копии шаблона на сером фоне
+    tpl = cv2.imread(os.path.join(cfg.templates_dir, "energy_close.png"))
+    img = np.full((600, 900, 3), 128, dtype=np.uint8)
+    th, tw = tpl.shape[:2]
+    for x in (100, 300, 500):
+        img[200:200 + th, x:x + tw] = tpl
+    boxes = v.find_all(img, "energy_close")
+    assert len(boxes) == 3
+    assert [b.x for b in boxes] == sorted(b.x for b in boxes)   # слева направо
+
+def test_find_all_empty_when_nothing_matches():
+    v = Vision(Config(), FixedReader(0))
+    img = np.full((600, 900, 3), 128, dtype=np.uint8)
+    assert v.find_all(img, "energy_close") == []
+
+# --- Иконка-череп «кто-то набирает помощников» ---
+#
+# Кадр 31_join_icon_base.png снят на экране БАЗЫ (не карты) — в брифе
+# фигурирует имя 31_join_icon_map.png, такого файла в reference/ нет.
+#
+# Отрицательный кадр 11_corruption_map_idle.png из брифа НЕ подошёл: замер
+# по всем reference/*.png (matchTemplate по templates/assault_call.png)
+# показал, что иконка на нём тоже видна (0.993) — она осталась от активного
+# сбора союзника на момент съёмки этого более раннего калибровочного кадра,
+# что подтверждено и глазами (реальный красный череп с бейджем на
+# скриншоте). 19_widget_0of4_energy50.png — кадр карты из той же сессии (те
+# же 11.2M/10.7M/6.68M в шапке), но снят до появления сбора: иконки на нём
+# нет (0.520). Взят как отрицательный пример вместо 11. Подробности замера —
+# в CALIBRATION.md.
+
+def test_assault_call_icon_found_on_map_frame():
+    v = Vision(Config(), FixedReader(0))
+    assert v.assault_call_icon(_ref("31_join_icon_base.png")) is not None
+
+def test_assault_call_icon_absent_without_calls():
+    v = Vision(Config(), FixedReader(0))
+    assert v.assault_call_icon(_ref("19_widget_0of4_energy50.png")) is None
+
+# --- Кнопка «Обновить» в окне сборов ---
+
+def test_refresh_button_found_when_shown():
+    v = Vision(Config(), FixedReader(0))
+    assert v.refresh_button(_ref("33_join_refresh.png")) is not None
+
+def test_refresh_button_absent_when_not_shown():
+    v = Vision(Config(), FixedReader(0))
+    assert v.refresh_button(_ref("32_join_list.png")) is None
