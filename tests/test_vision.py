@@ -356,3 +356,17 @@ def test_find_button_returns_box_with_template_size(tmp_path):
 
     assert (box.x, box.y) == (140, 65)      # центр совпадает со старым поведением
     assert (box.w, box.h) == (80, 30)
+
+# --- Присоединение к чужим штурмам: якорь окна «Война альянсов» ---
+
+def test_alliance_war_open_on_window_frame():
+    v = Vision(Config(), FixedReader(0))
+    assert v.alliance_war_open(_ref("30_alliance_war_empty.png")) is True
+
+def test_alliance_war_open_false_on_map():
+    v = Vision(Config(), FixedReader(0))
+    assert v.alliance_war_open(_ref("11_corruption_map_idle.png")) is False
+
+def test_classify_screen_knows_join_list():
+    v = Vision(Config(), TemplateReader(Config()))
+    assert v.classify_screen(_ref("30_alliance_war_empty.png")) == 'join_list'

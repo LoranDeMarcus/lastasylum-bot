@@ -196,6 +196,11 @@ class Vision:
         screen = self.corruption_screen(img)
         if screen is not None:
             return screen
+        join = self.join_screen(img)
+        if join == 'list':
+            return 'join_list'
+        if join is not None:
+            return 'join_preview'
         if self.on_world_map(img):
             return 'world_map'
         if self.on_base_view(img):
@@ -203,6 +208,40 @@ class Vision:
         if self.on_game_view(img):
             return 'game_view'
         return 'unknown'
+
+    def _match_region(self, img, name, region):
+        """Скор шаблона в фиксированной полосе. Полоса, а не весь кадр: это
+        режет ложные матчи и ускоряет проверку."""
+        x, y, w, h = region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl(name)
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return 0.0
+        return float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+
+    def alliance_war_open(self, img):
+        """Открыто ли окно «Война альянсов» — на любой вкладке.
+
+        Якорь — заголовок окна: вкладка для этого не годится (активная и
+        неактивная выглядят по-разному, урок вкладки «Элитная скверна»), а
+        бегущие баннеры объявлений проходят ниже заголовка и его не портят."""
+        score = self._match_region(img, "alliance_war", self.cfg.alliance_war_region)
+        return score >= self.cfg.alliance_war_threshold
+
+    def join_screen(self, img):
+        """Экран режима присоединения: 'list' (окно со сборами), 'preview'
+        (превью с «Отправиться»), 'preview_low_energy' (та же кнопка подменена
+        на «Увеличить энергию»), иначе None.
+
+        Порядок важен: «Увеличить энергию» проверяется первой, потому что она
+        стоит НА МЕСТЕ «Отправиться» и обе кнопки в кадре одновременно не живут."""
+        if self.find_button(img, "boost_energy") is not None:
+            return 'preview_low_energy'
+        if self.find_button(img, "dispatch") is not None:
+            return 'preview'
+        if self.alliance_war_open(img):
+            return 'list'
+        return None
 
     def on_base_view(self, img):
         """Мы в базе (не на карте мира).
