@@ -215,5 +215,66 @@ def test_low_energy_screen_calls_human_without_spending_flask():
     join = JoinActions(FakeDriver(OPEN + ['list', 'low']), vision, actions, _cfg(),
                        log=lambda *_: None, sleep=lambda *_: None, cancel=Cancel())
     assert join.run_once() == 'low_energy'
-    assert actions.closed == 1                 # превью закрыто
+    assert (900, 420) in join.driver.taps      # по слоту тапнули, превью открылось
+    assert actions.closed == 1                 # превью закрыто тапом по затемнению
+    assert join.driver.backs == 0              # и НЕ системной «назад»: она бы
+                                               # открыла диалог выхода из игры
     assert not hasattr(join, 'energy')         # рефилла в режиме join больше нет
+
+# --- I-1: не залипать внутри UI сборов ---
+
+def test_abort_on_preview_closes_it_by_tap_not_back():
+    """Кнопка «Отправиться» пропала с превью -> заход провален. Прибираться
+    надо тапом по затемнению: живой замер — BACK превью присоединения НЕ
+    закрывает, а открывает диалог выхода из игры. Оставленное превью перекрыло
+    бы иконку-череп, и следующий заход отдал бы 'no_calls' — молчаливое вечное
+    залипание (I-1)."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [card]},
+        buttons_by_frame={},                   # «Отправиться» не нашлась
+    )
+    actions = FakeActions()
+    join = JoinActions(FakeDriver(OPEN + ['list', 'preview']), vision, actions, _cfg(),
+                       log=lambda *_: None, sleep=lambda *_: None, cancel=Cancel())
+    assert join.run_once() == 'failed'
+    assert actions.closed == 1
+    assert join.driver.backs == 0
+
+def test_stuck_in_open_window_is_failure_not_no_calls():
+    """Иконку-череп перекрывает модалка сборов. Значит «иконки нет» + «на
+    экране окно сборов» — это не «сборов нет», а «мы застряли внутри UI».
+    'no_calls' тут нельзя: движок его провалом не считает, счётчик
+    max_search_failures не сработает и человека никто не позовёт."""
+    vision = FakeVision(screen_by_frame={'stuck': 'list'})
+    vision.icon = None
+    actions = FakeActions()
+    join = JoinActions(FakeDriver(['stuck']), vision, actions, _cfg(),
+                       log=lambda *_: None, sleep=lambda *_: None, cancel=Cancel())
+    assert join.run_once() == 'failed'
+    assert join.driver.backs == 1              # окно закрывается «назад»
+    assert actions.closed == 0
+
+def test_stuck_on_preview_is_failure_and_closed_by_tap():
+    """Тот же случай, но застряли на превью: тут «назад» откроет диалог
+    выхода, поэтому прибираемся тапом по затемнению."""
+    vision = FakeVision(screen_by_frame={'stuck': 'preview'})
+    vision.icon = None
+    actions = FakeActions()
+    join = JoinActions(FakeDriver(['stuck']), vision, actions, _cfg(),
+                       log=lambda *_: None, sleep=lambda *_: None, cancel=Cancel())
+    assert join.run_once() == 'failed'
+    assert actions.closed == 1
+    assert join.driver.backs == 0
+
+def test_no_calls_only_when_we_are_outside_join_ui():
+    """Обратная сторона: иконки нет и UI сборов на экране нет — вот это
+    честное «сборов нет», провалом считать нельзя."""
+    vision = FakeVision(screen_by_frame={'map': None})
+    vision.icon = None
+    join = JoinActions(FakeDriver(['map']), vision, FakeActions(), _cfg(),
+                       log=lambda *_: None, sleep=lambda *_: None, cancel=Cancel())
+    assert join.run_once() == 'no_calls'
+    assert join.driver.taps == []
+    assert join.driver.backs == 0

@@ -38,10 +38,23 @@ class JoinActions:
             self.sleep(self.human.poll_s(0.3))
         return None
 
-    def _abort(self, why):
-        self.log(f"  {why} -> BACK")
-        safe_back(self.driver, self.vision, self.cfg, log=self.log,
-                  sleep=self.sleep, human=self.human)
+    def _abort(self, why, img=None):
+        """Заход провален -> прибраться и уйти с экрана.
+
+        Способ уборки зависит от экрана: превью присоединения системная
+        «назад» НЕ закрывает (живой замер: вместо этого открывается диалог
+        «Выйти из игры?»), закрывает только тап по затемнению. Оставленное
+        превью перекрыло бы иконку-череп, и следующий заход отдал бы
+        'no_calls' — то самое молчаливое залипание."""
+        img = self.driver.screenshot() if img is None else img
+        if self.vision.join_screen(img) in ('preview', 'preview_low_energy'):
+            self.log(f"  {why} -> закрываю превью тапом по затемнению")
+            self.actions.close_preview()
+            self.human.after_tap(0.6)
+        else:
+            self.log(f"  {why} -> BACK")
+            safe_back(self.driver, self.vision, self.cfg, log=self.log,
+                      sleep=self.sleep, human=self.human)
         return "failed"
 
     def run_once(self):
@@ -49,8 +62,16 @@ class JoinActions:
         'low_energy' | 'failed' | 'stopped'."""
         if self.cancel.stopped():
             return "stopped"
-        icon = self.vision.assault_call_icon(self.driver.screenshot())
+        img = self.driver.screenshot()
+        icon = self.vision.assault_call_icon(img)
         if icon is None:
+            # Иконку-череп перекрывает модалка сборов: если её не видно, но на
+            # экране УЖЕ окно сборов или превью — это не «сборов нет», а «мы
+            # застряли внутри». Отдать тут 'no_calls' нельзя: движок его
+            # провалом не считает, и бот молча крутился бы вечно.
+            screen = self.vision.join_screen(img)
+            if screen is not None:
+                return self._abort(f"иконки нет, но мы внутри UI сборов ({screen})", img)
             return "no_calls"
 
         self.driver.tap(icon)

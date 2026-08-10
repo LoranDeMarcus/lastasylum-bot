@@ -49,13 +49,21 @@ class FakeDriver:
         self.zoom_outs += 1
 
 class FakeVision:
-    def __init__(self, energy=130, targets=None, squad='idle', on_map=True, active=0):
+    def __init__(self, energy=130, targets=None, squad='idle', on_map=True, active=0,
+                 active_after=None):
         self._energy = energy
         self._targets = targets if targets is not None else []
         self._squad = squad
         self._on_map = on_map
         self._active = active          # «Отряд N/4» для режима скверны
+        # что покажет счётчик со ВТОРОГО чтения: движок сверяет число отрядов
+        # до и после отправки. None -> счётчик не меняется
+        self._active_after = active_after
+        self.active_reads = 0
     def active_squads(self, img):
+        self.active_reads += 1
+        if self.active_reads > 1 and self._active_after is not None:
+            return self._active_after
         return self._active
     def on_world_map(self, img):
         return self._on_map
@@ -576,13 +584,14 @@ class FakeJoin:
         self.calls.append(None)
         return self.results.pop(0) if self.results else "dispatched"
 
-def _mk_join_engine(join, active=0, energy=80, flasks=251, fourth=True):
+def _mk_join_engine(join, active=0, energy=80, fourth=True, active_after=None):
     cfg = Config(screen_w=900, screen_h=1600, strategy="join",
                  use_fourth_squad=fourth)
-    eng = BotEngine(driver=FakeDriver(), vision=FakeVision(energy=energy, active=active),
+    eng = BotEngine(driver=FakeDriver(),
+                    vision=FakeVision(energy=energy, active=active,
+                                      active_after=active_after),
                     actions=FakeActions(), cfg=cfg, log=lambda m: None,
                     sleep=lambda s: None, join=join)
-    eng.flasks = flasks
     return eng
 
 def test_join_waits_when_all_squads_busy():
@@ -593,9 +602,37 @@ def test_join_waits_when_all_squads_busy():
 
 def test_join_dispatches_when_slot_free():
     join = FakeJoin(["dispatched"])
-    eng = _mk_join_engine(join, active=1)
+    eng = _mk_join_engine(join, active=1, active_after=2)   # отряд реально вышел
     assert eng.one_iteration().type == 'join_assault'
     assert len(join.calls) == 1
+    assert eng._no_progress == 0
+
+def test_join_dispatch_without_squad_growth_is_not_progress():
+    """Живой прогон 2026-08-10: JoinActions отдал 'dispatched', а счётчик
+    отрядов в игре так и остался 0/4 — сбор истёк между обновлением списка и
+    тапом по «Отправиться». Отправку надо ПРОВЕРЯТЬ, а не объявлять:
+    неподтверждённая не успех, счётчик провалов обязан расти, иначе бот
+    молчаливо крутится вхолостую (I-1)."""
+    join = FakeJoin(["dispatched"])
+    eng = _mk_join_engine(join, active=0)      # счётчик отрядов не вырос
+    eng.one_iteration()
+    assert eng._no_progress == 1
+
+def test_join_unconfirmed_dispatch_eventually_stops():
+    """Три неподтверждённые отправки подряд — стоп и зов человека, а не
+    бесконечный холостой цикл."""
+    join = FakeJoin(["dispatched"] * Config().max_search_failures)
+    eng = _mk_join_engine(join, active=0)
+    for _ in range(Config().max_search_failures - 1):
+        assert eng.one_iteration().type == 'join_assault'
+    assert eng.one_iteration().type == 'stop'
+
+def test_join_confirmed_dispatch_resets_failure_counter():
+    join = FakeJoin(["dispatched"])
+    eng = _mk_join_engine(join, active=1, active_after=2)
+    eng._no_progress = 2
+    eng.one_iteration()
+    assert eng._no_progress == 0
 
 def test_join_no_calls_is_not_a_failure():
     join = FakeJoin(["no_calls"])
@@ -623,7 +660,6 @@ def test_join_start_leaves_stock_unknown_until_read_from_game():
     lines = []
     join = FakeJoin()
     eng = _mk_join_engine(join)
-    eng.flasks = None
     eng.log = lines.append
     eng.start()
     assert eng.flasks is None

@@ -270,6 +270,15 @@ class BotEngine:
             self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
             return None
 
+        if res == 'dispatched' and not self._join_confirmed(active):
+            # Отправку ПРОВЕРЯЕМ, а не объявляем: живой прогон 2026-08-10 дал
+            # 'dispatched' на истёкшем сборе, отряд не вышел, а _no_progress
+            # обнулился — бот молча крутился вхолостую. Неподтверждённая
+            # отправка идёт по ветке провала; если мы при этом остались внутри
+            # окна сборов, следующий заход это увидит и приберётся (см.
+            # JoinActions.run_once).
+            res = 'unconfirmed'
+
         if res == 'dispatched':
             self._no_progress = 0
         else:
@@ -278,6 +287,31 @@ class BotEngine:
                 self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
                 return Action('stop')
         return Action('join_assault')
+
+    def _join_confirmed(self, before):
+        """Вырос ли счётчик «Отряд N/4» после тапа по «Отправиться».
+
+        Тот же приём, что у своего штурма (см. _corruption_iteration), но
+        строже: там расхождение только логируется, здесь оно отменяет успех.
+        Причина — живой прогон: сбор истёк между обновлением списка и тапом,
+        JoinActions отдал 'dispatched', отряд не вышел.
+
+        Ждём в цикле, а не смотрим один кадр: виджет отрядов перекрыт окном
+        сборов (замер по кадрам 32/34 — active_squads там всегда 0), поэтому
+        поверить счётчику можно, только когда игра вернёт нас на карту.
+        Не дождались -> отправка не подтверждена: ложный успех тут дороже
+        лишнего захода."""
+        after = before
+        rounds = max(1, int(self.cfg.panel_verify_timeout_s / 0.5))
+        for i in range(rounds):
+            after = self.vision.active_squads(self.driver.screenshot())
+            if after > before:
+                return True
+            if i < rounds - 1:
+                self.sleep(self.human.poll_s(0.5))
+        self.log(f"  отправка НЕ подтвердилась: отрядов было {before}, стало "
+                 f"{after} — сбор мог истечь, вступлением не считаю")
+        return False
 
     def one_iteration(self):
         # Стоп мог прийти, пока движок спал между итерациями
