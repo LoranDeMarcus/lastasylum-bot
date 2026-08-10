@@ -5,10 +5,24 @@ import numpy as np
 import cv2
 from src.models import Box
 
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
 def jitter(x, y, px, rng):
     if px == 0:
         return (x, y)
     return (x + rng.randint(-px, px), y + rng.randint(-px, px))
+
+def strip_adb_banner(out):
+    """Отрезать служебный текст adb перед PNG.
+
+    adb 1.0.36 (он же BlueStacks HD-Adb.exe) печатает «* daemon not running.
+    starting it now on port 5037 *» в stdout, а не в stderr. Если демон не
+    поднят, этот баннер приклеивается ПЕРЕД кадром `exec-out screencap` — и
+    картинка перестаёт декодироваться. Сервер мы теперь поднимаем заранее
+    (_ensure_server), но он может умереть и посреди работы (перезапуск
+    BlueStacks, чужой adb на порту 5037), поэтому кадр чистим всегда."""
+    i = out.find(PNG_MAGIC)
+    return out if i <= 0 else out[i:]      # -1 (нет PNG) отдаём как есть: пусть падает с диагностикой
 
 class Driver(Protocol):
     def screenshot(self): ...
@@ -20,20 +34,45 @@ class AdbDriver:
         self.cfg = cfg
         self.human = human
         self._rng = random.Random()
+        self._server_ready = False
+        self.last_stderr = b""
+
+    def _ensure_server(self):
+        """Поднять adb-демона отдельной командой, до первого кадра.
+
+        Иначе баннер запуска демона уходит в stdout первой же команды и
+        ломает PNG (см. strip_adb_banner). Здесь stdout выбрасываем, так
+        что баннеру некуда попасть. check=False: если демон не поднялся,
+        настоящая команда упадёт следом с внятной ошибкой."""
+        if self._server_ready:
+            return
+        subprocess.run([self.cfg.adb_path, "start-server"],
+                       capture_output=True, check=False)
+        self._server_ready = True
 
     def _adb(self, *args, capture=False):
+        self._ensure_server()
         cmd = [self.cfg.adb_path, "-s", self.cfg.adb_serial, *args]
         if capture:
-            return subprocess.run(cmd, capture_output=True, check=True).stdout
+            res = subprocess.run(cmd, capture_output=True, check=True)
+            self.last_stderr = res.stderr      # для диагностики битого кадра
+            return res.stdout
         subprocess.run(cmd, check=True)
         return None
 
     def screenshot(self):
-        png = self._adb("exec-out", "screencap", "-p", capture=True)
+        raw = self._adb("exec-out", "screencap", "-p", capture=True)
+        png = strip_adb_banner(raw)
         arr = np.frombuffer(png, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR) if arr.size else None
         if img is None:
-            raise RuntimeError("ADB screencap decode failed")
+            # Без содержимого ответа причину не отличить: пустой stdout —
+            # это упавший на устройстве screencap (adb 1.0.36 не пробрасывает
+            # его код возврата), мусор в начале — служебный текст adb.
+            raise RuntimeError(
+                f"ADB screencap decode failed: получено {len(raw)} байт, "
+                f"начало {raw[:80]!r}"
+                + (f", stderr: {self.last_stderr[:200]!r}" if self.last_stderr else ""))
         return img
 
     def tap(self, target):
@@ -90,5 +129,6 @@ class AdbDriver:
             se(0, 0, 0)                                       # SYN_REPORT
         se(0, 2, 0); se(0, 0, 0)                             # release
         script = "\n".join(lines) + "\n"
+        self._ensure_server()          # команда идёт мимо _adb — демона поднимаем сами
         subprocess.run([self.cfg.adb_path, "-s", self.cfg.adb_serial, "shell"],
                        input=script.encode(), check=True)

@@ -1,8 +1,66 @@
 import random
+import subprocess
+import cv2
+import numpy as np
+import pytest
 from config import Config
-from src.driver import jitter, AdbDriver
+from src.driver import jitter, AdbDriver, strip_adb_banner
 from src.models import Box
 from src.human import Human
+
+# Ровно то, что adb 1.0.36 (BlueStacks HD-Adb.exe) пишет в stdout, когда
+# демон ещё не поднят. Проверено вживую: kill-server -> exec-out screencap.
+DAEMON_BANNER = (b"* daemon not running. starting it now on port 5037 *\n"
+                 b"* daemon started successfully *\n")
+
+def _png_bytes(w=8, h=4):
+    ok, buf = cv2.imencode(".png", np.zeros((h, w, 3), np.uint8))
+    assert ok
+    return buf.tobytes()
+
+def test_screenshot_survives_adb_daemon_banner():
+    """Регрессия падения бота: adb 1.0.36 печатает баннер запуска демона в
+    stdout, а не в stderr, и он приклеивается ПЕРЕД PNG первого кадра.
+    imdecode такого не понимал -> RuntimeError на первой же итерации."""
+    drv = AdbDriver(Config())
+    drv._adb = lambda *a, **k: DAEMON_BANNER + _png_bytes()
+    img = drv.screenshot()
+    assert img.shape == (4, 8, 3)
+
+def test_strip_banner_leaves_clean_png_untouched():
+    png = _png_bytes()
+    assert strip_adb_banner(png) == png
+
+def test_screenshot_error_tells_what_came_back():
+    """Голое «decode failed» не даёт понять, что случилось. В сообщении
+    должен быть размер и начало ответа, иначе разбор снова начнётся с нуля."""
+    drv = AdbDriver(Config())
+    drv._adb = lambda *a, **k: b"error: device offline"
+    with pytest.raises(RuntimeError, match="device offline"):
+        drv.screenshot()
+
+def test_screenshot_reports_empty_output():
+    """Пустой stdout при коде возврата 0: adb 1.0.36 не пробрасывает код
+    удалённой команды, так что упавший screencap выглядит как успех."""
+    drv = AdbDriver(Config())
+    drv._adb = lambda *a, **k: b""
+    with pytest.raises(RuntimeError, match="0 байт"):
+        drv.screenshot()
+
+def test_adb_starts_daemon_before_first_command(monkeypatch):
+    """Демон поднимается отдельной командой, чей stdout никому не нужен —
+    тогда баннеру неоткуда попасть в бинарный кадр. Один раз на процесс."""
+    cmds = []
+    def fake_run(cmd, **kw):
+        cmds.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    drv = AdbDriver(Config())
+    drv.back()
+    drv.back()
+    assert cmds[0][1] == "start-server"
+    assert sum(1 for c in cmds if "start-server" in c) == 1
+    assert cmds[1][-1] == "4" and cmds[2][-1] == "4"
 
 def test_back_sends_keyevent_back():
     """BACK закрывает случайно открытый диалог -> вид снова чистый."""
