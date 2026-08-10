@@ -1,6 +1,6 @@
 # Last Asylum Bot
 
-Текущая версия: **0.3.0** ([CHANGELOG.md](CHANGELOG.md)).
+Текущая версия: **0.2.1** ([CHANGELOG.md](CHANGELOG.md)).
 
 Бот для **Last Asylum: Plague** (пакет `com.phs.global`) в эмуляторе BlueStacks.
 Управляет игрой через ADB и OpenCV: смотрит на кадр экрана, узнаёт кнопки по
