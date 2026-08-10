@@ -142,6 +142,7 @@ def test_race_for_slot_retries_next_card():
     assert actions.run_once() == 'dispatched'
     assert (900, 420) in actions.driver.taps      # первый тап — по разобранному
     assert (900, 920) in actions.driver.taps      # второй — по живому слоту
+    assert actions.races == 1                     # гонку посчитали (спека §2 п.8)
 
 def test_taps_refresh_when_it_appears():
     fresh = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=30)
@@ -154,6 +155,25 @@ def test_taps_refresh_when_it_appears():
     actions, _ = _join(OPEN + ['list', 'fresh', 'preview'], vision)
     assert actions.run_once() == 'dispatched'
     assert (548, 1800) in actions.driver.taps         # «Обновить» нажата
+
+def test_refresh_tap_is_followed_by_poll_pause():
+    """Бейдж на «Обновить» может врать (живая находка). Если кнопка не
+    исчезнет, без паузы бот будет долбить её раз в секунду — ровно тот
+    машинный ритм, от которого бережёт Human. После тапа обязана идти обычная
+    пауза опроса, как и в ветке «кнопки нет»."""
+    fresh = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=30)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'fresh': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [], 'fresh': [fresh]},
+        refresh_by_frame={'list': Box(548, 1800, 300, 90)},
+        buttons_by_frame=DISPATCH,
+    )
+    cfg = _cfg()
+    sleeps = []
+    join = JoinActions(FakeDriver(OPEN + ['list', 'fresh', 'preview']), vision, None,
+                       cfg, log=lambda *_: None, sleep=sleeps.append, cancel=Cancel())
+    assert join.run_once() == 'dispatched'
+    assert cfg.join_poll_interval_s in sleeps
 
 def test_run_once_makes_no_taps_when_already_stopped():
     """Стоп нажат до захода — ни одного тапа."""

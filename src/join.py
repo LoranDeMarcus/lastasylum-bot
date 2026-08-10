@@ -26,6 +26,11 @@ class JoinActions:
         self.sleep = sleep
         self.human = human if human is not None else Human(cfg, sleep=sleep)
         self.cancel = cancel if cancel is not None else Cancel()
+        # Гонки за слот (тапнули по «+», а место уже заняли) считаем отдельно
+        # и только логируем: провалом это не считается, но частые гонки —
+        # сигнал, что бот опаздывает, и увидеть его надо в числе, а не глазами
+        # по строчкам лога.
+        self.races = 0
 
     def _wait_any(self, wanted, timeout_s=None):
         t = self.cfg.panel_verify_timeout_s if timeout_s is None else timeout_s
@@ -108,13 +113,18 @@ class JoinActions:
                     self.log("  появилась «Обновить» -> перечитываю список")
                     self.driver.tap(btn)
                     self.human.after_tap(0.8)
-                else:
-                    self.sleep(self.human.poll_s(self.cfg.join_poll_interval_s))
+                    # Пауза опроса нужна и здесь: бейдж на «Обновить» может
+                    # врать, и если кнопка не исчезнет, без паузы бот начнёт
+                    # долбить её раз в секунду — ровно тот машинный ритм, от
+                    # которого бережёт Human.
+                self.sleep(self.human.poll_s(self.cfg.join_poll_interval_s))
                 continue
 
             res = self._join(card)
             if res == "taken":
-                self.log("  места разобрали — пробую следующую карточку")
+                self.races += 1
+                self.log(f"  места разобрали — пробую следующую карточку "
+                         f"(гонок за слот: {self.races})")
                 continue
             return res
 
