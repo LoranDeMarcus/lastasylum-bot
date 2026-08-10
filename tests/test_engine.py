@@ -627,6 +627,19 @@ def test_join_unconfirmed_dispatch_eventually_stops():
         assert eng.one_iteration().type == 'join_assault'
     assert eng.one_iteration().type == 'stop'
 
+def test_join_counts_only_confirmed_joins():
+    """Счётчик вступлений — тот, по которому раннер решает, что дело сделано.
+    Живой прогон 2026-08-10 отрапортовал «ИТОГО вступлений: 1», хотя из игры
+    не вышел ни один отряд: считалось по 'dispatched' из JoinActions. Считать
+    можно только подтверждённые счётчиком «Отряд N/4» вступления."""
+    eng = _mk_join_engine(FakeJoin(["dispatched"]), active=0)
+    eng.one_iteration()
+    assert eng.joins == 0                  # отрядов не прибавилось — не вступили
+
+    ok = _mk_join_engine(FakeJoin(["dispatched"]), active=0, active_after=1)
+    ok.one_iteration()
+    assert ok.joins == 1
+
 def test_join_confirmed_dispatch_resets_failure_counter():
     join = FakeJoin(["dispatched"])
     eng = _mk_join_engine(join, active=1, active_after=2)

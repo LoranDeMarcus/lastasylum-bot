@@ -36,6 +36,10 @@ class BotEngine:
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
         self._no_progress = 0       # подряд итераций без отправки (сосед-промах / провал «Поиска»)
+        # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
+        # а не раннер: подтверждение видно только здесь, а «dispatched» от
+        # JoinActions — всего лишь «тап прошёл», и живьём уже оказывался ложным.
+        self.joins = 0
 
     def start(self):
         if self.cfg.dry_run:
@@ -282,6 +286,7 @@ class BotEngine:
 
         if res == 'dispatched':
             self._no_progress = 0
+            self.joins += 1
         else:
             self._no_progress += 1
             if self._no_progress >= self.cfg.max_search_failures:
