@@ -430,9 +430,18 @@ def test_find_all_empty_when_nothing_matches():
 # нет (0.520). Взят как отрицательный пример вместо 11. Подробности замера —
 # в CALIBRATION.md.
 
-def test_assault_call_icon_found_on_map_frame():
+def test_assault_call_icon_found_on_base_frame():
+    """Кадр 31 снят В БАЗЕ: иконка-череп видна и там, поэтому кадр годится
+    как позитив, но «на карте» его называть нельзя — тест назывался
+    ..._on_map_frame и вводил в заблуждение."""
     v = Vision(Config(), FixedReader(0))
     assert v.assault_call_icon(_ref("31_join_icon_base.png")) is not None
+
+def test_assault_call_icon_found_on_real_map_frame():
+    """А это уже настоящая карта мира: бот ищет иконку именно отсюда, и без
+    такого позитива про карту не проверялось вообще ничего."""
+    v = Vision(Config(), FixedReader(0))
+    assert v.assault_call_icon(_ref("20_map_energy42.png")) is not None
 
 def test_assault_call_icon_absent_without_calls():
     v = Vision(Config(), FixedReader(0))
@@ -512,8 +521,22 @@ def test_join_cards_bounds_slot_search_by_next_card_anchor():
     band_top, band_left = a_cy + dy, a_cx + dx
     # смещение 30 от начала полосы: помещается в фолбэк-окно (170px), но НЕ
     # в реальное окно первой карточки (612 - 476 = 136px < 30 + высота шаблона)
-    leak_x, leak_y = band_left + 50, band_top + 30
+    leak_offset = 30
+    leak_x, leak_y = band_left + 50, band_top + leak_offset
     img[leak_y:leak_y + th_s, leak_x:leak_x + tw_s] = tpl_slot
+
+    # Бинарность теста держится на ВЫСОТЕ шаблона «+»: он обязан помещаться в
+    # фолбэк-окно и НЕ помещаться в обрезанное. Перережут шаблон крупнее — «+»
+    # не влезет никуда и тест продолжит проходить, ничего не различая; мельче
+    # — влезет в оба окна и упадёт на ровном месте. Поэтому окно проверяем
+    # явно, а не надеемся на него. Сейчас join_slot.png = 122px при окне
+    # 107…140px.
+    real_h = (600 + th_c // 2) - band_top          # 136: граница по СЛЕДУЮЩЕМУ якорю
+    assert real_h - leak_offset < th_s <= bh - leak_offset, (
+        f"высота templates/join_slot.png = {th_s}px вышла из окна "
+        f"{real_h - leak_offset + 1}…{bh - leak_offset}px — тест перестал "
+        f"различать ветку anchors[i+1] и фолбэк a.y+join_card_height; "
+        f"пересчитай leak_offset или расстояние между якорями")
 
     v = Vision(cfg, FixedReader(0))
     cards = v.join_cards(img)
