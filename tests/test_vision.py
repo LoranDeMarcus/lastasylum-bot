@@ -433,3 +433,24 @@ def test_refresh_button_found_when_shown():
 def test_refresh_button_absent_when_not_shown():
     v = Vision(Config(), FixedReader(0))
     assert v.refresh_button(_ref("32_join_list.png")) is None
+
+# --- Карточки сборов: якорь «Элитная скверна», свободные слоты, таймер ---
+
+def test_join_cards_empty_list_frame():
+    v = Vision(Config(), TemplateReader(Config()))
+    assert v.join_cards(_ref("30_alliance_war_empty.png")) == []
+
+def test_join_cards_reads_live_frame():
+    v = Vision(Config(), TemplateReader(Config()))
+    cards = v.join_cards(_ref("32_join_list.png"))
+    assert cards, "на кадре 32 должна быть хотя бы одна карточка сбора"
+    assert all(c.y > 0 for c in cards)
+    assert cards == sorted(cards, key=lambda c: c.y)          # сверху вниз
+    first = cards[0]
+    assert all(a.x <= b.x for a, b in zip(first.slots, first.slots[1:]))
+    # Точные ожидания по кадру 32: одна карточка «Ур.30 Элитная скверна»,
+    # четыре свободных «+» слева направо, таймер «В команде 00:00:41».
+    assert len(cards) == 1
+    assert len(first.slots) == 4
+    assert [s.x for s in first.slots] == [535, 670, 807, 945]
+    assert first.seconds == 41

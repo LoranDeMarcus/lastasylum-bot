@@ -238,12 +238,22 @@ class Config:
     alliance_war_threshold: float = 0.7
     # Область списка карточек (ниже вкладок, выше низа окна)
     join_list_region: tuple = (0, 245, 1080, 1600)
-    join_card_threshold: float = 0.75
-    join_slot_threshold: float = 0.8
+    # Пороги — середина разрыва между худшим позитивом и лучшим негативом,
+    # замер по reference/*.png (подробности в CALIBRATION.md):
+    # join_card — позитив 1.00 (кадр 32), худший негатив 0.60 (кадр 12) -> 0.80;
+    # join_slot — позитивы 0.82..1.00 (4 слота кадра 32), худший негатив 0.44
+    # (кадры превью отправки) -> 0.63.
+    join_card_threshold: float = 0.80
+    join_slot_threshold: float = 0.63
     # Полоса слотов и регион таймера — ОТНОСИТЕЛЬНО якоря «Элитная скверна»
     # (dx, dy, w, h). Карточки съезжают, фиксированные координаты промахнутся.
-    join_card_plus_band: tuple = (380, 120, 700, 200)
-    join_card_timer_region: tuple = (600, 40, 220, 50)
+    # Замер по reference/32_join_list.png (1080x1920): 4 зелёных «+» центры
+    # y≈545, x≈531/668/806/944; полоса слотов x≈470..1020, y≈480..615.
+    join_card_plus_band: tuple = (235, 164, 570, 170)
+    # Замер по reference/32_join_list.png: цифры таймера «00:00:41» x≈833..965,
+    # y≈408..437. Регион чуть шире с запасом — иначе крайний «0» слева
+    # обрезается краем кропа и контур-фильтр TemplateReader читает мусор.
+    join_card_timer_region: tuple = (585, 88, 155, 38)
     join_card_height: int = 480              # высота карточки для последней в списке
 
     def squad_limit(self):

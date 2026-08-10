@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from src.models import Target, Box
+from src.models import Target, Box, JoinCard
 
 class Vision:
     def __init__(self, cfg, reader):
@@ -392,6 +392,39 @@ class Vision:
         """Жёлтая «Обновить» внизу окна сборов или None. Появляется, только
         когда список устарел, поэтому её отсутствие — не ошибка."""
         return self.find_button(img, "join_refresh")
+
+    def join_cards(self, img):
+        """Карточки сборов «Элитная скверна» в окне, сверху вниз.
+
+        Якорь карточки — надпись «Элитная скверна» слева. Слоты и таймер
+        отсчитываются ОТ ЯКОРЯ, а не по фиксированным координатам: список
+        съезжает по вертикали. Тот же приём спас рефилл склянкой — строка
+        ищется по иконке, а не по координате из конфига."""
+        anchors = self.find_all(img, "join_card", region=self.cfg.join_list_region,
+                                threshold=self.cfg.join_card_threshold)
+        cards = []
+        for i, a in enumerate(anchors):
+            bottom = (anchors[i + 1].y if i + 1 < len(anchors)
+                      else a.y + self.cfg.join_card_height)
+            dx, dy, bw, bh = self.cfg.join_card_plus_band
+            band_h = min(bh, max(0, bottom - (a.y + dy)))
+            slots = self.find_all(img, "join_slot",
+                                  region=(a.x + dx, a.y + dy, bw, band_h),
+                                  threshold=self.cfg.join_slot_threshold)
+            slots.sort(key=lambda b: b.x)
+            tx, ty, tw, th = self.cfg.join_card_timer_region
+            cards.append(JoinCard(y=a.y, slots=slots,
+                                  seconds=self._read_seconds(img, (a.x + tx, a.y + ty, tw, th))))
+        return cards
+
+    def _read_seconds(self, img, region):
+        """Остаток таймера «В команде 00:00:35» как целое число.
+
+        Двоеточия отсеиваются фильтром компонент, поэтому «00:00:35» читается
+        как 35, а «00:01:20» — как 120. Точность и не нужна: решение бинарное
+        («меньше порога в 10 секунд или нет»), а любое время с минутами даёт
+        заведомо трёхзначное число, то есть «времени хватает»."""
+        return self.reader.read(img, region)
 
     def read_energy(self, img):
         """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,
