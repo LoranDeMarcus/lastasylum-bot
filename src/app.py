@@ -6,6 +6,7 @@ from src.numbers import TemplateReader   # шаблоны цифр (без вн�
 from src.vision import Vision
 from src.actions import Actions
 from src.corruption import CorruptionActions
+from src.join import JoinActions
 from src.engine import BotEngine
 from src.human import Human
 from src.watchdog import Watchdog
@@ -26,12 +27,14 @@ def main():
                           human=human, cancel=cancel)
         corruption = CorruptionActions(driver, vision, actions, cfg, log=log_q.put,
                                        sleep=cancel.sleep, human=human, cancel=cancel)
+        join = JoinActions(driver, vision, actions, cfg, log=log_q.put,
+                           sleep=cancel.sleep, human=human, cancel=cancel)
         # sleep через cancel: иначе сторож проспит свои 12 с ожидания
         # непрерываемым sleep и кнопка Стоп снова начнёт «залипать»
         watchdog = Watchdog(driver, vision, cfg, log=log_q.put,
                             sleep=cancel.sleep, human=human, cancel=cancel)
         return BotEngine(driver, vision, actions, cfg, log=log_q.put,
-                         sleep=cancel.sleep, corruption=corruption,
+                         sleep=cancel.sleep, corruption=corruption, join=join,
                          human=human, cancel=cancel, watchdog=watchdog)
 
     controller = BotController(make_engine)

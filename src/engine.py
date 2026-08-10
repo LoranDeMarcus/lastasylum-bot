@@ -6,6 +6,7 @@ from src.models import GameState, Action, nearest
 from src.cancel import Cancel
 from src.decide import decide
 from src.human import Human
+from src.version import VERSION
 
 class BotEngine:
     """Цикл фарма. Один отряд-на-задачу за раз (v1 последовательный):
@@ -16,7 +17,7 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None, human=None, cancel=None, watchdog=None):
+                 corruption=None, join=None, human=None, cancel=None, watchdog=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
@@ -30,13 +31,21 @@ class BotEngine:
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
+        self.join = join               # JoinActions для режима «Присоединиться к штурму»
         self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
         self._no_progress = 0       # подряд итераций без отправки (сосед-промах / провал «Поиска»)
+        # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
+        # а не раннер: подтверждение видно только здесь, а «dispatched» от
+        # JoinActions — всего лишь «тап прошёл», и живьём уже оказывался ложным.
+        self.joins = 0
 
     def start(self):
+        # Версия — первой строкой лога: это самое ценное место для неё, лог и
+        # присылают человеку, когда бот ведёт себя не так, как ожидалось.
+        self.log(f"Last Asylum Bot {VERSION}")
         if self.cfg.dry_run:
             self.flasks = 10 ** 9        # в dry-run не открываем энергоокно
             self.log("Старт (DRY-RUN: тапов не будет).")
@@ -47,6 +56,13 @@ class BotEngine:
             self.flasks = None
             self.log("Старт («Элитная скверна»). Остаток склянок прочитаю "
                      "из игры после первого рефилла.")
+        elif self.cfg.strategy == "join":
+            # flasks остаётся None намеренно: ветка нужна лишь затем, чтобы
+            # режим не проваливался в use_search_strategy. Ни энергия, ни
+            # склянки в этом режиме не тратятся, читать их неоткуда и незачем.
+            self.flasks = None
+            self.log("Старт (присоединение к чужим штурмам). Энергия и склянки "
+                     "в этом режиме не тратятся.")
         elif self.cfg.use_search_strategy:
             # окно энергии открывается только с превью отправки; с карты «+»
             # тапнет кнопку дома -> склянки прочитаем на первом же превью
@@ -220,10 +236,99 @@ class BotEngine:
                 return Action('stop')
         return Action('assault_boss')
 
+    def _join_iteration(self):
+        """Режим «присоединяться к чужим штурмам»: гейт тот же, что у своего
+        штурма (число активных отрядов), но вместо запуска сбора бот ищет чужой.
+
+        Сборов нет — это НЕ провал: просто ждём и пробуем снова. Провалом
+        считается только незнакомый экран/несостоявшийся шаг."""
+        if self.watchdog is not None:
+            verdict = self.watchdog.check()
+            if verdict == 'stop':
+                return Action('stop')
+            if verdict == 'recovered':
+                return None
+        img = self.driver.screenshot()
+        active = self.vision.active_squads(img)
+        limit = self.cfg.squad_limit()
+        if active >= limit:
+            self.log(f"Занято {active} из {limit} разрешённых, ждём.")
+            self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
+            return None
+
+        energy = self.vision.read_energy(img)
+        # Склянки и энергия тут ни при чём: вступление в чужой штурм бесплатное,
+        # энергия уходит только на СВОЙ штурм. Читаем её лишь для лога.
+        self.log(f"[отрядов={active}/{limit}] энергия={energy} -> ищу чужой сбор")
+        if self.cfg.dry_run:
+            self.sleep(1.0)
+            return Action('join_assault')
+
+        res = self.join.run_once()
+        if res == 'stopped':
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
+        self.log(f"  Присоединение -> {res}")
+
+        if res == 'low_energy':
+            self.log("Игра просит энергию за присоединение, хотя оно бесплатное "
+                     "— стоп, нужен человек.")
+            return Action('stop')
+        if res == 'no_calls':
+            self.log("Сборов сейчас нет, жду.")
+            self.sleep(self.human.idle_s(self.cfg.corruption_poll_interval_s))
+            return None
+
+        if res == 'dispatched' and not self._join_confirmed(active):
+            # Отправку ПРОВЕРЯЕМ, а не объявляем: живой прогон 2026-08-10 дал
+            # 'dispatched' на истёкшем сборе, отряд не вышел, а _no_progress
+            # обнулился — бот молча крутился вхолостую. Неподтверждённая
+            # отправка идёт по ветке провала; если мы при этом остались внутри
+            # окна сборов, следующий заход это увидит и приберётся (см.
+            # JoinActions.run_once).
+            res = 'unconfirmed'
+
+        if res == 'dispatched':
+            self._no_progress = 0
+            self.joins += 1
+        else:
+            self._no_progress += 1
+            if self._no_progress >= self.cfg.max_search_failures:
+                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+                return Action('stop')
+        return Action('join_assault')
+
+    def _join_confirmed(self, before):
+        """Вырос ли счётчик «Отряд N/4» после тапа по «Отправиться».
+
+        Тот же приём, что у своего штурма (см. _corruption_iteration), но
+        строже: там расхождение только логируется, здесь оно отменяет успех.
+        Причина — живой прогон: сбор истёк между обновлением списка и тапом,
+        JoinActions отдал 'dispatched', отряд не вышел.
+
+        Ждём в цикле, а не смотрим один кадр: виджет отрядов перекрыт окном
+        сборов (замер по кадрам 32/34 — active_squads там всегда 0), поэтому
+        поверить счётчику можно, только когда игра вернёт нас на карту.
+        Не дождались -> отправка не подтверждена: ложный успех тут дороже
+        лишнего захода."""
+        after = before
+        rounds = max(1, int(self.cfg.panel_verify_timeout_s / 0.5))
+        for i in range(rounds):
+            after = self.vision.active_squads(self.driver.screenshot())
+            if after > before:
+                return True
+            if i < rounds - 1:
+                self.sleep(self.human.poll_s(0.5))
+        self.log(f"  отправка НЕ подтвердилась: отрядов было {before}, стало "
+                 f"{after} — сбор мог истечь, вступлением не считаю")
+        return False
+
     def one_iteration(self):
         # Стоп мог прийти, пока движок спал между итерациями
         if self.cancel.stopped():
             return Action('stop')
+        if self.cfg.strategy == "join":
+            return self._join_iteration()
         if self.cfg.strategy == "corruption":
             return self._corruption_iteration()
         if self.cfg.use_search_strategy:

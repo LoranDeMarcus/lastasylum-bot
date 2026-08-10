@@ -2,6 +2,11 @@
 import queue
 import threading
 from src.cancel import Cancel
+from src.version import VERSION
+
+# Заголовок окна — вынесен в константу, чтобы версия была видна человеку и
+# проверялась тестом без запуска tkinter (run_gui импортирует его лениво).
+GUI_TITLE = f"Last Asylum Bot {VERSION}"
 
 class BotController:
     """Владелец отмены: один Cancel уходит и в фабрику (там на нём строятся
@@ -41,10 +46,17 @@ def apply_flask_threshold(cfg, raw):
     cfg.flask_stop_threshold = n
     return n
 
+def apply_strategy(cfg, value):
+    """Режим бота из GUI. Неизвестное значение игнорируем: лучше остаться в
+    прежнем режиме, чем уронить движок неизвестной веткой."""
+    if value in ("corruption", "join"):
+        cfg.strategy = value
+    return cfg.strategy
+
 def run_gui(controller, log_queue=None, cfg=None):
     import tkinter as tk
     root = tk.Tk()
-    root.title("Last Asylum Bot")
+    root.title(GUI_TITLE)
     log = tk.Text(root, height=18, width=60, state="disabled")
     log.pack(padx=8, pady=8)
 
@@ -92,6 +104,23 @@ def run_gui(controller, log_queue=None, cfg=None):
 
         tk.Checkbutton(squad_row, text="Отправлять 4-й отряд",
                        variable=fourth_var, command=toggle_fourth).pack(side="left")
+
+        mode_row = tk.Frame(root); mode_row.pack(pady=(0, 2))
+        mode_var = tk.StringVar(value=cfg.strategy)
+
+        def apply_mode():
+            # пишем в cfg сразу, без «Применить»: движок читает cfg каждую
+            # итерацию, значит режим можно менять, не останавливая бота
+            apply_strategy(cfg, mode_var.get())
+            if log_queue is not None:
+                names = {"corruption": "свой штурм", "join": "присоединяться к чужим"}
+                log_queue.put(f"Режим: {names.get(cfg.strategy, cfg.strategy)}")
+
+        tk.Label(mode_row, text="Режим:").pack(side="left", padx=(0, 4))
+        tk.Radiobutton(mode_row, text="Свой штурм", value="corruption",
+                       variable=mode_var, command=apply_mode).pack(side="left")
+        tk.Radiobutton(mode_row, text="Присоединяться", value="join",
+                       variable=mode_var, command=apply_mode).pack(side="left")
 
     def request_stop():
         # без этой строки пауза до первой реакции выглядит как «кнопка не работает»

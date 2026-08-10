@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from src.models import Target, Box
+from src.models import Target, Box, JoinCard
 
 class Vision:
     def __init__(self, cfg, reader):
@@ -196,6 +196,11 @@ class Vision:
         screen = self.corruption_screen(img)
         if screen is not None:
             return screen
+        join = self.join_screen(img)
+        if join == 'list':
+            return 'join_list'
+        if join is not None:
+            return 'join_preview'
         if self.on_world_map(img):
             return 'world_map'
         if self.on_base_view(img):
@@ -203,6 +208,43 @@ class Vision:
         if self.on_game_view(img):
             return 'game_view'
         return 'unknown'
+
+    def _match_region(self, img, name, region):
+        """Скор шаблона в фиксированной полосе. Полоса, а не весь кадр: это
+        режет ложные матчи и ускоряет проверку."""
+        x, y, w, h = region
+        crop = img[y:y + h, x:x + w]
+        tpl = self._state_tpl(name)
+        if tpl is None or crop.shape[0] < tpl.shape[0] or crop.shape[1] < tpl.shape[1]:
+            return 0.0
+        return float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
+
+    def alliance_war_open(self, img):
+        """Открыто ли окно «Война альянсов» — на любой вкладке.
+
+        Якорь — заголовок окна: вкладка для этого не годится (активная и
+        неактивная выглядят по-разному, урок вкладки «Элитная скверна»), а
+        бегущие баннеры объявлений проходят ниже заголовка и его не портят."""
+        score = self._match_region(img, "alliance_war", self.cfg.alliance_war_region)
+        return score >= self.cfg.alliance_war_threshold
+
+    def join_screen(self, img):
+        """Экран режима присоединения: 'list' (окно со сборами), 'preview'
+        (превью с «Отправиться»), 'preview_low_energy' (та же кнопка подменена
+        на «Увеличить энергию»), иначе None.
+
+        Порядок важен: «Увеличить энергию» проверяется первой, потому что она
+        стоит НА МЕСТЕ «Отправиться» и обе кнопки в кадре одновременно не живут.
+
+        Свой шаблон кнопки: dispatch.png включает строку цены «⚡ 10», а
+        вступление бесплатное."""
+        if self.find_button(img, "boost_energy") is not None:
+            return 'preview_low_energy'
+        if self.find_button(img, "join_dispatch") is not None:
+            return 'preview'
+        if self.alliance_war_open(img):
+            return 'list'
+        return None
 
     def on_base_view(self, img):
         """Мы в базе (не на карте мира).
@@ -311,6 +353,81 @@ class Vision:
             return None
         th, tw = tpl.shape[:2]
         return Box(maxloc[0] + tw // 2, maxloc[1] + th // 2, tw, th)
+
+    def find_all(self, img, name, region=None, threshold=None, min_dist=None):
+        """Все совпадения шаблона, а не лучшее (как find_button): карточек и
+        слотов в кадре несколько.
+
+        Соседние пики одного объекта подавляются: matchTemplate даёт кляксу
+        совпадений вокруг каждой находки, без подавления один «+» превратился
+        бы в десяток."""
+        tpl = self._state_tpl(name)
+        if tpl is None:
+            return []
+        x0, y0 = 0, 0
+        area = img
+        if region is not None:
+            x0, y0, w, h = region
+            area = img[y0:y0 + h, x0:x0 + w]
+        th, tw = tpl.shape[:2]
+        if area.shape[0] < th or area.shape[1] < tw:
+            return []
+        thr = self.cfg.template_match_threshold if threshold is None else threshold
+        res = cv2.matchTemplate(area, tpl, cv2.TM_CCOEFF_NORMED)
+        ys, xs = np.where(res >= thr)
+        gap = min_dist if min_dist is not None else max(tw, th) // 2
+        out = []
+        for x, y in sorted(zip(xs, ys), key=lambda p: -res[p[1], p[0]]):
+            cx, cy = x0 + int(x) + tw // 2, y0 + int(y) + th // 2
+            if any(abs(cx - b.x) < gap and abs(cy - b.y) < gap for b in out):
+                continue
+            out.append(Box(cx, cy, tw, th))
+        out.sort(key=lambda b: (b.y, b.x))
+        return out
+
+    def assault_call_icon(self, img):
+        """Красная иконка-череп «кто-то набирает помощников» или None.
+        Видна и на карте, и в базе. Бейдж с числом и таймер в шаблон не
+        входят — они меняются каждую секунду."""
+        return self.find_button(img, "assault_call")
+
+    def refresh_button(self, img):
+        """Жёлтая «Обновить» внизу окна сборов или None. Появляется, только
+        когда список устарел, поэтому её отсутствие — не ошибка."""
+        return self.find_button(img, "join_refresh")
+
+    def join_cards(self, img):
+        """Карточки сборов «Элитная скверна» в окне, сверху вниз.
+
+        Якорь карточки — надпись «Элитная скверна» слева. Слоты и таймер
+        отсчитываются ОТ ЯКОРЯ, а не по фиксированным координатам: список
+        съезжает по вертикали. Тот же приём спас рефилл склянкой — строка
+        ищется по иконке, а не по координате из конфига."""
+        anchors = self.find_all(img, "join_card", region=self.cfg.join_list_region,
+                                threshold=self.cfg.join_card_threshold)
+        cards = []
+        for i, a in enumerate(anchors):
+            bottom = (anchors[i + 1].y if i + 1 < len(anchors)
+                      else a.y + self.cfg.join_card_height)
+            dx, dy, bw, bh = self.cfg.join_card_plus_band
+            band_h = min(bh, max(0, bottom - (a.y + dy)))
+            slots = self.find_all(img, "join_slot",
+                                  region=(a.x + dx, a.y + dy, bw, band_h),
+                                  threshold=self.cfg.join_slot_threshold)
+            slots.sort(key=lambda b: b.x)
+            tx, ty, tw, th = self.cfg.join_card_timer_region
+            cards.append(JoinCard(y=a.y, slots=slots,
+                                  seconds=self._read_seconds(img, (a.x + tx, a.y + ty, tw, th))))
+        return cards
+
+    def _read_seconds(self, img, region):
+        """Остаток таймера «В команде 00:00:35» как целое число.
+
+        Двоеточия отсеиваются фильтром компонент, поэтому «00:00:35» читается
+        как 35, а «00:01:20» — как 120. Точность и не нужна: решение бинарное
+        («меньше порога в 10 секунд или нет»), а любое время с минутами даёт
+        заведомо трёхзначное число, то есть «времени хватает»."""
+        return self.reader.read(img, region)
 
     def read_energy(self, img):
         """Энергия из HUD. Белые цифры лежат ПОВЕРХ зелёной полосы заполнения,

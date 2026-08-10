@@ -2,7 +2,7 @@
 import time
 import threading
 from config import Config
-from src.gui import BotController, apply_flask_threshold
+from src.gui import BotController, apply_flask_threshold, apply_strategy
 
 class DummyEngine:
     def __init__(self):
@@ -87,3 +87,16 @@ def test_apply_flask_threshold_accepts_zero_and_spaces():
     cfg = Config()
     assert apply_flask_threshold(cfg, "  0 ") == 0
     assert cfg.flask_stop_threshold == 0
+
+# --- Переключатель режима (corruption / join) ---
+
+def test_apply_strategy_switches_mode():
+    cfg = Config()
+    assert apply_strategy(cfg, "join") == "join"
+    assert cfg.strategy == "join"
+
+def test_apply_strategy_ignores_unknown():
+    cfg = Config()
+    cfg.strategy = "corruption"
+    assert apply_strategy(cfg, "чепуха") == "corruption"
+    assert cfg.strategy == "corruption"
