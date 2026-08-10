@@ -454,3 +454,87 @@ def test_join_cards_reads_live_frame():
     assert len(first.slots) == 4
     assert [s.x for s in first.slots] == [535, 670, 807, 945]
     assert first.seconds == 41
+
+def test_join_cards_three_card_list_counts_free_slots_and_timers():
+    """Кадр 35: три карточки сбора сразу, у ПЕРВОЙ один слот занят аватаром
+    соклановца. На кадре 32 свободны были все 4 «+» — баг «занятый слот
+    ошибочно посчитан как свободный» такой тест поймать не мог в принципе.
+    Заодно это первый живой кадр с несколькими карточками — есть на чём
+    проверить сортировку якорей сверху вниз и то, что таймер/слоты не
+    перепутались между карточками."""
+    v = Vision(Config(), TemplateReader(Config()))
+    cards = v.join_cards(_ref("35_join_list_3cards.png"))
+    assert len(cards) == 3
+    assert cards == sorted(cards, key=lambda c: c.y)          # сверху вниз
+    assert [len(c.slots) for c in cards] == [3, 4, 4]
+    # у первой карточки занят самый левый «+» (x=535) — его в списке быть не должно
+    assert [s.x for s in cards[0].slots] == [670, 807, 945]
+    assert [s.x for s in cards[1].slots] == [535, 670, 807, 945]
+    assert [s.x for s in cards[2].slots] == [535, 670, 807, 945]
+    assert [c.seconds for c in cards] == [26, 41, 45]
+
+def test_join_cards_bounds_slot_search_by_next_card_anchor():
+    """Синтетический кадр: два якоря «Элитная скверна» стоят через 300px —
+    ближе, чем join_card_height (480). На живых кадрах (32, 35) такого не
+    бывает: там карточки стоят ~504-508px, а полоса поиска слотов и так
+    упирается в потолок join_card_plus_band[3]=170 что при anchors[i+1], что
+    при фолбэке a.y+join_card_height — веткой не различить (см. отчёт
+    задачи 4 / CALIBRATION.md). Здесь якоря специально сближены, чтобы
+    граница по СЛЕДУЮЩЕМУ якорю оказалась короче фолбэка: между полосой
+    поиска первой карточки и самим вторым якорем кладём валидный шаблон
+    «+», который обязан остаться СНАРУЖИ обрезанного окна первой карточки
+    (иначе он утёк бы в чужую карточку) и который слишком далеко от второй
+    карточки, чтобы попасть в её собственную полосу слотов."""
+    cfg = Config()
+    tpl_card = cv2.imread(os.path.join(cfg.templates_dir, "join_card.png"))
+    tpl_slot = cv2.imread(os.path.join(cfg.templates_dir, "join_slot.png"))
+    th_c, tw_c = tpl_card.shape[:2]
+    th_s, tw_s = tpl_slot.shape[:2]
+    img = np.full((900, 1080, 3), 128, dtype=np.uint8)
+    img[300:300 + th_c, 100:100 + tw_c] = tpl_card
+    img[600:600 + th_c, 100:100 + tw_c] = tpl_card       # якорь через 300px, не 480+
+    a_cx, a_cy = 100 + tw_c // 2, 300 + th_c // 2
+    dx, dy, bw, bh = cfg.join_card_plus_band
+    band_top, band_left = a_cy + dy, a_cx + dx
+    # смещение 30 от начала полосы: помещается в фолбэк-окно (170px), но НЕ
+    # в реальное окно первой карточки (612 - 476 = 136px < 30 + высота шаблона)
+    leak_x, leak_y = band_left + 50, band_top + 30
+    img[leak_y:leak_y + th_s, leak_x:leak_x + tw_s] = tpl_slot
+
+    v = Vision(cfg, FixedReader(0))
+    cards = v.join_cards(img)
+    assert len(cards) == 2
+    assert cards[0].slots == []     # «плюс» из зазора не утёк в первую карточку
+    assert cards[1].slots == []     # и не попал во вторую (её полоса ниже)
+
+def test_join_cards_sorts_slots_by_x_even_if_match_order_differs():
+    """`find_all` сортирует совпадения по (y, x) — то есть по x упорядочивает
+    только ВНУТРИ одной строки. На живых кадрах все «+» одной карточки лежат
+    на одном y (547 что на кадре 32, что на кадре 35), поэтому там сортировка
+    `slots.sort(key=lambda b: b.x)` в `join_cards` ничего не меняет и живым
+    кадром не проверяется. Синтетика кладёт два «+» с разным y так, что
+    сортировка (y, x) от `find_all` даёт x-убывающий порядок — и только явная
+    пересортировка по x в `join_cards` возвращает списко-возрастающий."""
+    cfg = Config()
+    tpl_card = cv2.imread(os.path.join(cfg.templates_dir, "join_card.png"))
+    tpl_slot = cv2.imread(os.path.join(cfg.templates_dir, "join_slot.png"))
+    th_c, tw_c = tpl_card.shape[:2]
+    th_s, tw_s = tpl_slot.shape[:2]
+    img = np.full((900, 1080, 3), 128, dtype=np.uint8)
+    img[300:300 + th_c, 100:100 + tw_c] = tpl_card
+    a_cx, a_cy = 100 + tw_c // 2, 300 + th_c // 2
+    dx, dy, bw, bh = cfg.join_card_plus_band
+    band_top, band_left = a_cy + dy, a_cx + dx
+    # A: маленький y-офсет, большой x (справа) -> find_all поставит его ПЕРВЫМ
+    ax, ay = band_left + 400, band_top + 0
+    img[ay:ay + th_s, ax:ax + tw_s] = tpl_slot
+    # B: больший y-офсет, маленький x (слева) -> find_all поставит его ВТОРЫМ
+    bx, by = band_left + 50, band_top + 40
+    img[by:by + th_s, bx:bx + tw_s] = tpl_slot
+
+    v = Vision(cfg, FixedReader(0))
+    cards = v.join_cards(img)
+    assert len(cards) == 1
+    xs = [s.x for s in cards[0].slots]
+    assert len(xs) == 2
+    assert xs == sorted(xs)          # слева направо, а не в порядке find_all
