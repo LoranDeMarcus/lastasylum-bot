@@ -6,3 +6,9 @@ tests/fixtures/*.png
 debug/
 STOP
 reference/anomaly/
+
+# Рабочие материалы разработки: боту в рантайме не нужны, лежат только локально.
+docs/
+tools/
+CALIBRATION.md
+.superpowers/
