@@ -376,6 +376,20 @@ def test_classify_screen_knows_join_list():
     v = Vision(Config(), TemplateReader(Config()))
     assert v.classify_screen(_ref("30_alliance_war_empty.png")) == 'join_list'
 
+def test_join_screen_preview_on_live_frame():
+    v = Vision(Config(), FixedReader(0))
+    assert v.join_screen(_ref("34_join_preview.png")) == 'preview'
+
+def test_classify_screen_knows_join_preview():
+    v = Vision(Config(), TemplateReader(Config()))
+    assert v.classify_screen(_ref("34_join_preview.png")) == 'join_preview'
+
+def test_join_dispatch_template_does_not_fire_on_own_assault_preview():
+    """Превью СВОЕГО штурма — не превью присоединения: там кнопка с ценой
+    «⚡ 10», её ловит dispatch.png, а join_dispatch.png ловить не должен."""
+    v = Vision(Config(), FixedReader(0))
+    assert v.find_button(_ref("03_dispatch_preview_squad1.png"), "join_dispatch") is None
+
 # --- find_all: все совпадения шаблона, а не только лучшее ---
 #
 # templates/join_slot.png ещё не нарезан — карточку сбора (Vision.join_cards)

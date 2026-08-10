@@ -234,10 +234,13 @@ class Vision:
         на «Увеличить энергию»), иначе None.
 
         Порядок важен: «Увеличить энергию» проверяется первой, потому что она
-        стоит НА МЕСТЕ «Отправиться» и обе кнопки в кадре одновременно не живут."""
+        стоит НА МЕСТЕ «Отправиться» и обе кнопки в кадре одновременно не живут.
+
+        Свой шаблон кнопки: dispatch.png включает строку цены «⚡ 10», а
+        вступление бесплатное."""
         if self.find_button(img, "boost_energy") is not None:
             return 'preview_low_energy'
-        if self.find_button(img, "dispatch") is not None:
+        if self.find_button(img, "join_dispatch") is not None:
             return 'preview'
         if self.alliance_war_open(img):
             return 'list'

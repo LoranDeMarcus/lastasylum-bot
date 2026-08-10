@@ -60,7 +60,7 @@ def _join(frames, vision, cfg=None, actions=None):
                        log=lambda *_: None, sleep=lambda *_: None,
                        cancel=Cancel()), frames
 
-DISPATCH = {'preview': {'dispatch': Box(540, 1360, 300, 90)}}
+DISPATCH = {'preview': {'join_dispatch': Box(540, 1360, 300, 90)}}
 
 # Кадры расходуются по одному на КАЖДЫЙ screenshot(). Заход тратит три кадра
 # ещё до окна: иконка, подтверждение окна, подтверждение вкладки. Дальше —

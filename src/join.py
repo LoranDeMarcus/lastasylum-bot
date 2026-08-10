@@ -133,7 +133,7 @@ class JoinActions:
 
         if self.cancel.stopped():
             return "stopped"
-        send = self.vision.find_button(self.driver.screenshot(), "dispatch")
+        send = self.vision.find_button(self.driver.screenshot(), "join_dispatch")
         if send is None:
             return self._abort("кнопка «Отправиться» пропала")
         self.driver.tap(send)
