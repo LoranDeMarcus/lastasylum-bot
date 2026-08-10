@@ -1,10 +1,12 @@
 import random
+import struct
 import subprocess
 import cv2
 import numpy as np
 import pytest
 from config import Config
-from src.driver import jitter, AdbDriver, strip_adb_banner
+from src.driver import (jitter, AdbDriver, strip_adb_banner, decode_raw_screencap,
+                        RAW_FAILURES_BEFORE_GIVING_UP)
 from src.models import Box
 from src.human import Human
 
@@ -146,3 +148,84 @@ def test_human_disabled_overrides_hold_flag():
     cmd = calls[0]
     # Обязано быть input tap, а не swipe, несмотря на human_tap_hold=True
     assert cmd == ("shell", "input", "tap", "500", "800")
+
+# --- сырой кадр вместо PNG ---
+
+def _raw_bytes(rgba, colorspace=True):
+    """Ровно то, что отдаёт `adb exec-out screencap` без -p."""
+    h, w = rgba.shape[:2]
+    hdr = struct.pack("<III", w, h, 1) + (b"\x00" * 4 if colorspace else b"")
+    return hdr + rgba.tobytes()
+
+def _rgba(w=8, h=4, px=(255, 0, 0, 255)):
+    a = np.zeros((h, w, 4), np.uint8)
+    a[:, :] = px
+    return a
+
+def test_raw_screencap_decodes_modern_header():
+    """Android 10+: после ширины, высоты и формата идут ещё 4 байта
+    цветового пространства. Замер на живом BlueStacks — заголовок 16 байт."""
+    img = decode_raw_screencap(_raw_bytes(_rgba()))
+    assert img.shape == (4, 8, 3)
+
+def test_raw_screencap_decodes_legacy_header():
+    """У старых Android цветового пространства нет. Наличие определяем по
+    остатку длины, а не по версии: длина ответа известна точно."""
+    img = decode_raw_screencap(_raw_bytes(_rgba(), colorspace=False))
+    assert img.shape == (4, 8, 3)
+
+def test_raw_screencap_keeps_channel_order():
+    """Кадр приходит RGBA, а всё зрение бота работает в BGR. Перепутанные
+    каналы не уронили бы бота — они молча испортили бы каждый матч шаблона."""
+    img = decode_raw_screencap(_raw_bytes(_rgba(px=(255, 0, 0, 255))))
+    assert tuple(img[0, 0]) == (0, 0, 255)      # красный остался красным
+
+def test_raw_decoder_refuses_anything_that_is_not_a_raw_frame():
+    """None — это путь фолбэка, а не ошибка: не распознали, значит снимем PNG.
+    Баннер демона и обрезанный ответ обязаны попадать именно сюда."""
+    assert decode_raw_screencap(_png_bytes()) is None
+    assert decode_raw_screencap(DAEMON_BANNER + _raw_bytes(_rgba())) is None
+    assert decode_raw_screencap(b"") is None
+    assert decode_raw_screencap(_raw_bytes(_rgba())[:-100]) is None   # кадр обрезан
+
+def test_screenshot_prefers_raw_and_never_asks_for_png():
+    """Ради этого всё и делалось: PNG стоит 528 мс против 245 мс у сырого."""
+    drv = AdbDriver(Config())
+    asked = []
+    def fake(*a, **k):
+        asked.append(a)
+        return _raw_bytes(_rgba())
+    drv._adb = fake
+    assert drv.screenshot().shape == (4, 8, 3)
+    assert asked == [("exec-out", "screencap")]
+
+def test_screenshot_falls_back_to_png_when_raw_is_not_understood():
+    """Устройство может отдать кадр в другом формате пикселей. Это не повод
+    падать: молча снимаем PNG, как раньше."""
+    drv = AdbDriver(Config())
+    drv._adb = lambda *a, **k: b"not a raw frame" if "-p" not in a else _png_bytes()
+    assert drv.screenshot().shape == (4, 8, 3)
+
+def test_screenshot_stops_retrying_raw_after_repeated_failures():
+    """Разовую неудачу прощаем — она бывает от моргнувшего adb. Но на
+    устройстве, где сырой кадр не работает никогда, каждый снимок стоил бы
+    двух запросов, и весь выигрыш ушёл бы в минус."""
+    drv = AdbDriver(Config())
+    asked = []
+    def fake(*a, **k):
+        asked.append(a)
+        return _png_bytes() if "-p" in a else b"not a raw frame"
+    drv._adb = fake
+    for _ in range(10):
+        drv.screenshot()
+    assert sum(1 for a in asked if "-p" not in a) == RAW_FAILURES_BEFORE_GIVING_UP
+
+def test_fast_screencap_can_be_switched_off():
+    drv = AdbDriver(Config(fast_screencap=False))
+    asked = []
+    def fake(*a, **k):
+        asked.append(a)
+        return _png_bytes()
+    drv._adb = fake
+    drv.screenshot()
+    assert asked == [("exec-out", "screencap", "-p")]

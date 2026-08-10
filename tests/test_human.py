@@ -71,3 +71,38 @@ def test_poll_and_idle_never_shorter_than_base():
     h = _h()
     assert all(h.poll_s(0.3) >= 0.3 for _ in range(200))
     assert all(h.idle_s(10.0) >= 10.0 for _ in range(200))
+
+# --- гоночный путь ---
+
+def test_race_pause_stays_inside_its_range():
+    """Гонка за слот живёт в сотнях миллисекунд. Верхняя граница здесь —
+    обещание скорости, нижняя — то, что пауза всё-таки есть."""
+    h = _h()
+    xs = [h.race_s() for _ in range(500)]
+    lo, hi = Config().delay_race
+    assert all(lo <= x <= hi for x in xs)
+
+def test_race_pause_is_much_shorter_than_ordinary_reaction():
+    """Смысл всей правки: там, где обычная реакция стоит около секунды,
+    гоночная обязана стоить десятки миллисекунд."""
+    h = _h()
+    race = statistics.median([h.race_s() for _ in range(2000)])
+    react = statistics.median([h.delay('react') for _ in range(2000)])
+    assert race < react / 3
+
+def test_race_pause_is_still_random():
+    """Ужат масштаб разброса, а не сам разброс: машину выдаёт одинаковость
+    пауз, а не их краткость. Одинаковых пауз быть не должно."""
+    h = _h()
+    xs = [round(h.race_s(), 4) for _ in range(200)]
+    assert len(set(xs)) > 100
+    assert statistics.mean(xs) > statistics.median(xs)   # хвост вправо на месте
+
+def test_race_poll_is_fast_and_not_clamped_upward():
+    """Опрос экрана — единственное место, где правило «только вверх» не
+    действует: снимок игре не виден, наблюдаемы только тапы."""
+    h = _h()
+    lo, hi = Config().delay_poll_race
+    xs = [h.poll_race_s() for _ in range(500)]
+    assert all(lo <= x <= hi for x in xs)
+    assert max(xs) < Config().delay_poll[0]     # быстрее обычного опроса

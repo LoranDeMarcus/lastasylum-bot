@@ -1,4 +1,5 @@
 import random
+import struct
 import subprocess
 from typing import Protocol
 import numpy as np
@@ -6,6 +7,9 @@ import cv2
 from src.models import Box
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+RAW_RGBA_8888 = 1          # screencap отдаёт этот формат (замер: format=1)
+RAW_HEADER_SIZES = (12, 16)  # w,h,format; у Android 10+ следом цветовое пространство
+RAW_FAILURES_BEFORE_GIVING_UP = 3
 
 def jitter(x, y, px, rng):
     if px == 0:
@@ -24,6 +28,32 @@ def strip_adb_banner(out):
     i = out.find(PNG_MAGIC)
     return out if i <= 0 else out[i:]      # -1 (нет PNG) отдаём как есть: пусть падает с диагностикой
 
+def decode_raw_screencap(out):
+    """Сырой кадр `adb exec-out screencap` (без -p) -> BGR, или None.
+
+    Вдвое дешевле PNG: живой замер на BlueStacks — 245 мс против 528 мс.
+    Разница вся в кодеке, устройство не жмёт кадр, а хост не разжимает.
+    Платим трафиком (8.3 МБ против 2.3 МБ), но по локальному TCP эмулятора
+    это заметно дешевле сжатия.
+
+    Заголовок: ширина, высота, формат — по 4 байта little-endian, у Android
+    10+ следом ещё 4 байта цветового пространства. Его наличие считаем по
+    остатку длины, а не по версии Android: длина ответа известна точно,
+    гадать незачем.
+
+    None вместо исключения — это путь фолбэка, а не ошибки: не распознали
+    (другой формат пикселей, баннер adb, вообще не кадр) — просто снимем PNG."""
+    if len(out) < min(RAW_HEADER_SIZES):
+        return None
+    w, h, fmt = struct.unpack("<III", out[:12])
+    if fmt != RAW_RGBA_8888 or not (0 < w <= 8192 and 0 < h <= 8192):
+        return None
+    body = w * h * 4
+    if len(out) - body not in RAW_HEADER_SIZES:
+        return None
+    arr = np.frombuffer(out, dtype=np.uint8, count=body, offset=len(out) - body)
+    return cv2.cvtColor(arr.reshape(h, w, 4), cv2.COLOR_RGBA2BGR)
+
 class Driver(Protocol):
     def screenshot(self): ...
     def tap(self, target): ...
@@ -36,6 +66,7 @@ class AdbDriver:
         self._rng = random.Random()
         self._server_ready = False
         self.last_stderr = b""
+        self._raw_failures = 0        # подряд; см. screenshot()
 
     def _ensure_server(self):
         """Поднять adb-демона отдельной командой, до первого кадра.
@@ -61,6 +92,22 @@ class AdbDriver:
         return None
 
     def screenshot(self):
+        """Кадр экрана. Сначала пробуем сырой screencap (вдвое быстрее PNG),
+        при неудаче честно снимаем PNG.
+
+        Фолбэк не залипает с первого раза: «не распозналось» бывает и
+        разовым (adb моргнул, устройство отвалилось), а платить за это
+        вечным медленным путём обидно. Но и пытаться бесконечно нельзя —
+        на устройстве с другим форматом кадра каждый снимок стоил бы двух.
+        Поэтому считаем неудачи ПОДРЯД и после третьей уходим на PNG до
+        перезапуска бота."""
+        if self.cfg.fast_screencap and self._raw_failures < RAW_FAILURES_BEFORE_GIVING_UP:
+            img = decode_raw_screencap(self._adb("exec-out", "screencap", capture=True))
+            if img is not None:
+                self._raw_failures = 0
+                return img
+            self._raw_failures += 1
+
         raw = self._adb("exec-out", "screencap", "-p", capture=True)
         png = strip_adb_banner(raw)
         arr = np.frombuffer(png, dtype=np.uint8)

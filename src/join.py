@@ -17,13 +17,17 @@ class JoinActions:
     в самом живом альянсе."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 human=None, cancel=None):
+                 human=None, cancel=None, now=time.monotonic):
         self.driver = driver
         self.vision = vision
         self.actions = actions        # Actions: нужен close_preview()
         self.cfg = cfg
         self.log = log
         self.sleep = sleep
+        # Часы отдельным входом: грейс «слот увели» меряется настоящим
+        # временем (кадр стоит четверть секунды, счётчиком итераций его не
+        # выразить), а тесту нужны управляемые часы.
+        self.now = now
         self.human = human if human is not None else Human(cfg, sleep=sleep)
         self.cancel = cancel if cancel is not None else Cancel()
         # Гонки за слот (тапнули по «+», а место уже заняли) считаем отдельно
@@ -32,16 +36,52 @@ class JoinActions:
         # по строчкам лога.
         self.races = 0
 
-    def _wait_any(self, wanted, timeout_s=None):
+    def _poll_frames(self, timeout_s=None):
+        """Кадры экрана с паузой опроса, пока не вышел таймаут. Отдаёт
+        (сколько прошло от начала ожидания, кадр).
+
+        Границы две, и нужны обе. По ВРЕМЕНИ — потому что кадр стоит около
+        трети секунды, и счётчик итераций, настроенный на интервал опроса
+        в 0,08 с, отмерил бы вместо 2,5 с все пятнадцать. По ЧИСЛУ ИТЕРАЦИЙ —
+        потому что с остановленными часами (а в тесте они стоят) временная
+        граница не наступит никогда."""
         t = self.cfg.panel_verify_timeout_s if timeout_s is None else timeout_s
-        for _ in range(max(1, int(t / 0.3))):
+        t0 = self.now()
+        for _ in range(max(1, int(t / self.cfg.join_race_poll_s))):
             if self.cancel.stopped():
-                return None
-            screen = self.vision.join_screen(self.driver.screenshot())
+                return
+            elapsed = self.now() - t0
+            if elapsed > t:
+                return
+            yield elapsed, self.driver.screenshot()
+            self.sleep(self.human.poll_race_s())
+
+    def _wait_any(self, wanted, timeout_s=None):
+        for _, img in self._poll_frames(timeout_s):
+            screen = self.vision.join_screen(img)
             if screen in wanted:
                 return screen
-            self.sleep(self.human.poll_s(0.3))
         return None
+
+    def _wait_preview(self):
+        """Ждём превью после тапа по «+». Возвращает (экран, кадр).
+
+        Кадр отдаём наверх не из аккуратности: на нём же ищется «Отправиться».
+        Отдельный снимок ради той же кнопки стоил бы ещё четверть секунды, а
+        превью статично — двигаться там нечему.
+
+        'list' означает «слот увели», но принимать этот вердикт сразу нельзя:
+        первый кадр приходит через доли секунды после тапа, игра ещё рисует
+        список. Поспешное «увели» стоило бы нам УЖЕ занятого слота — превью
+        осталось бы открытым и перекрыло иконку следующего захода. Поэтому
+        список идёт в вердикт только после join_taken_grace_s."""
+        for elapsed, img in self._poll_frames():
+            screen = self.vision.join_screen(img)
+            if screen in ('preview', 'preview_low_energy'):
+                return screen, img
+            if screen == 'list' and elapsed >= self.cfg.join_taken_grace_s:
+                return 'list', img
+        return None, None
 
     def _abort(self, why, img=None):
         """Заход провален -> прибраться и уйти с экрана.
@@ -80,17 +120,20 @@ class JoinActions:
             return "no_calls"
 
         self.driver.tap(icon)
-        self.human.after_tap(1.0)
+        self.human.race_pause()
         if self._wait_any({'list'}) is None:
             return "stopped" if self.cancel.stopped() else self._abort("окно сборов не открылось")
 
-        # вкладка может быть не выбрана -> тапаем ВСЕГДА, без проверки активности
-        if self.cancel.stopped():
-            return "stopped"
-        self.driver.tap(self.cfg.tap_box("join_tab", self.cfg.join_tab_xy))
-        self.human.after_tap(0.8)
-        if self._wait_any({'list'}) is None:
-            return "stopped" if self.cancel.stopped() else self._abort("вкладка «Событие» не открылась")
+        # Вкладку «Событие» не тапаем: иконка-череп открывает окно сразу на
+        # ней (живой замер юзера). Прежний безусловный тап стоил ~2,2 с на
+        # каждом заходе — в гонке за слот это цена самого слота.
+        if self.cfg.join_tap_tab:
+            if self.cancel.stopped():
+                return "stopped"
+            self.driver.tap(self.cfg.tap_box("join_tab", self.cfg.join_tab_xy))
+            self.human.race_pause()
+            if self._wait_any({'list'}) is None:
+                return "stopped" if self.cancel.stopped() else self._abort("вкладка «Событие» не открылась")
 
         return self._wait_in_window()
 
@@ -145,8 +188,8 @@ class JoinActions:
         if self.cancel.stopped():
             return "stopped"
         self.driver.tap(card.slots[-1])
-        self.human.after_tap(1.0)
-        screen = self._wait_any({'preview', 'preview_low_energy', 'list'})
+        self.human.race_pause()
+        screen, img = self._wait_preview()
         if screen is None:
             return "stopped" if self.cancel.stopped() else self._abort("превью не открылось")
         if screen == 'list':
@@ -164,7 +207,10 @@ class JoinActions:
 
         if self.cancel.stopped():
             return "stopped"
-        send = self.vision.find_button(self.driver.screenshot(), "join_dispatch")
+        # Кнопку ищем на ТОМ ЖЕ кадре, по которому опознали превью: именно она
+        # его и опознала (join_screen ищет join_dispatch), а свежий снимок
+        # стоил бы ещё четверть секунды посреди гонки.
+        send = self.vision.find_button(img, "join_dispatch")
         if send is None:
             return self._abort("кнопка «Отправиться» пропала")
         self.driver.tap(send)

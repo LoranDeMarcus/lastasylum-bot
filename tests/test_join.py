@@ -52,6 +52,10 @@ class FakeActions:
 def _cfg():
     cfg = Config()
     cfg.human_enabled = False        # без случайных пауз тест детерминирован
+    # Грейс «слот увели» меряется настоящими часами, а тест не спит вовсе —
+    # у него экран меняется мгновенно. Здесь грейс выключен, а сам он
+    # проверяется отдельно, с управляемыми часами (см. FakeClock ниже).
+    cfg.join_taken_grace_s = 0.0
     return cfg
 
 def _join(frames, vision, cfg=None, actions=None):
@@ -62,12 +66,13 @@ def _join(frames, vision, cfg=None, actions=None):
 
 DISPATCH = {'preview': {'join_dispatch': Box(540, 1360, 300, 90)}}
 
-# Кадры расходуются по одному на КАЖДЫЙ screenshot(). Заход тратит три кадра
-# ещё до окна: иконка, подтверждение окна, подтверждение вкладки. Дальше —
-# кадр на проверку окна (он же идёт в join_cards), кадр на подтверждение
-# превью и кадр на поиск кнопки «Отправиться». Последний кадр в списке
-# повторяется, поэтому хвост можно не дублировать.
-OPEN = ['list', 'list', 'list']
+# Кадры расходуются по одному на КАЖДЫЙ screenshot(). До окна заход тратит
+# два: кадр на поиск иконки и кадр на подтверждение окна (вкладку «Событие»
+# больше не тапаем — окно открывается сразу на ней). Дальше кадр на проверку
+# окна (он же идёт в join_cards) и кадр на подтверждение превью; отдельного
+# кадра на поиск «Отправиться» нет — кнопку ищем на кадре превью. Последний
+# кадр списка повторяется, поэтому хвост можно не дублировать.
+OPEN = ['list', 'list']
 
 def test_no_calls_when_icon_absent():
     vision = FakeVision({'a': None})
@@ -213,8 +218,8 @@ def test_run_once_stops_while_idling_for_cards():
     actions = JoinActions(drv, vision, None, _cfg(), log=lambda *_: None,
                           sleep=fake_sleep, cancel=cancel)
     assert actions.run_once() == 'stopped'
-    assert drv.taps == [(986, 1089), (884, 188)]     # икона + вкладка, дальше ни тапа
-    assert drv.backs == 0                             # прибираться незачем
+    assert drv.taps == [(986, 1089)]        # только иконка, дальше ни тапа
+    assert drv.backs == 0                   # прибираться незачем
 
 def test_run_once_fails_and_backs_when_dialog_missing():
     """Окно сборов не открылось после тапа по иконке -> BACK, провал."""
@@ -287,6 +292,141 @@ def test_stuck_on_preview_is_failure_and_closed_by_tap():
     assert join.run_once() == 'failed'
     assert actions.closed == 1
     assert join.driver.backs == 0
+
+# --- Скорость: гонка за слот выигрывается кадрами и паузами ---
+
+class FakeClock:
+    """Часы, которые идут только когда бот спит. Так тест меряет ровно то же,
+    что и живой бот: время между тапом и вердиктом."""
+    def __init__(self):
+        self.t = 0.0
+    def __call__(self):
+        return self.t
+    def sleep(self, s):
+        self.t += s
+
+def test_event_tab_is_not_tapped():
+    """Иконка-череп открывает окно СРАЗУ на вкладке «Событие» (живой замер
+    юзера). Лишний тап стоил тапа, паузы после него и кадра на верификацию —
+    около 2,2 с на каждом заходе, то есть ровно того времени, за которое
+    место и разбирают."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [card]},
+        buttons_by_frame=DISPATCH,
+    )
+    actions, _ = _join(OPEN + ['list', 'preview'], vision)
+    assert actions.run_once() == 'dispatched'
+    assert Config().join_tab_xy not in actions.driver.taps
+
+def test_event_tab_can_be_brought_back_by_flag():
+    """Страховка: начнёт игра открывать окно на другой вкладке — прежнее
+    поведение возвращается одним флагом, без правки кода."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [card]},
+        buttons_by_frame=DISPATCH,
+    )
+    cfg = _cfg()
+    cfg.join_tap_tab = True
+    actions, _ = _join(['list'] + OPEN + ['list', 'preview'], vision, cfg=cfg)
+    assert actions.run_once() == 'dispatched'
+    assert cfg.join_tab_xy in actions.driver.taps
+
+def test_dispatch_button_is_found_on_the_preview_frame_itself():
+    """«Отправиться» ищется на том кадре, который и опознал превью. Лишний
+    снимок стоит ~245 мс живого времени посреди гонки, а превью статично."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [card]},
+        buttons_by_frame=DISPATCH,
+    )
+    actions, _ = _join(OPEN + ['list', 'preview'], vision)
+    assert actions.run_once() == 'dispatched'
+    assert actions.driver.i == 4        # иконка, окно, список, превью — и всё
+
+def test_list_right_after_tap_is_not_yet_a_lost_slot():
+    """Гонку нельзя объявлять проигранной по первому кадру: он приходит через
+    доли секунды после тапа, игра ещё рисует список. Поспешное «увели» стоило
+    бы нам УЖЕ занятого слота — превью осталось бы открытым и перекрыло
+    иконку следующего захода."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [card]},
+        buttons_by_frame=DISPATCH,
+    )
+    cfg = _cfg()
+    cfg.join_taken_grace_s = 0.8
+    clock = FakeClock()
+    # После тапа игра ещё три кадра показывает список и только потом превью.
+    join = JoinActions(FakeDriver(OPEN + ['list', 'list', 'list', 'list', 'preview']),
+                       vision, None, cfg, log=lambda *_: None,
+                       sleep=clock.sleep, cancel=Cancel(), now=clock)
+    assert join.run_once() == 'dispatched'      # дождались, а не сдались
+    assert join.races == 0
+
+def test_list_after_grace_is_a_lost_slot():
+    """Обратная сторона: список, который держится дольше грейса, — это
+    честно проигранная гонка, и надо брать следующую карточку."""
+    taken = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    ok = JoinCard(y=800, slots=[Box(900, 920, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'second': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [taken, ok], 'second': [ok]},
+        buttons_by_frame=DISPATCH,
+    )
+    cfg = _cfg()
+    cfg.join_taken_grace_s = 0.05
+    cfg.delay_poll_race = (0.1, 0.1)     # шаг часов фиксирован: грейс истечёт
+    clock = FakeClock()                  # ровно на втором кадре после тапа
+    # Список держится два кадра после тапа: на втором грейс уже вышел.
+    join = JoinActions(FakeDriver(OPEN + ['list', 'list', 'list', 'second', 'preview']),
+                       vision, None, cfg, log=lambda *_: None,
+                       sleep=clock.sleep, cancel=Cancel(), now=clock)
+    assert join.run_once() == 'dispatched'
+    assert join.races == 1
+    assert (900, 920) in join.driver.taps
+
+def test_wait_gives_up_by_wall_clock_not_by_iteration_count():
+    """Ловушка быстрого опроса: таймаут нельзя отмерять числом итераций.
+    Кадр стоит около трети секунды, а пауза опроса — 0,08 с; счётчик,
+    настроенный на паузу, отмерил бы вместо 2,5 с все пятнадцать, и бот
+    после каждого неудачного захода замирал бы на четверть минуты."""
+    vision = FakeVision(screen_by_frame={'чужое': None})
+    clock = FakeClock()
+    cfg = _cfg()
+    drv = FakeDriver(['чужое'])
+    join = JoinActions(drv, vision, None, cfg, log=lambda *_: None,
+                       sleep=lambda s: clock.sleep(0.32 + s),   # кадр + пауза
+                       cancel=Cancel(), now=clock)
+    assert join._wait_any({'list'}) is None
+    assert clock.t <= cfg.panel_verify_timeout_s + 0.4      # уложились в таймаут
+    assert drv.i <= 9                                        # а не 31 итерация
+
+def test_race_path_pauses_are_short():
+    """Гонка проигрывается в паузах, а не в логике: между тапом и следующим
+    кадром не должно быть секундных ожиданий. Разброс при этом обязан
+    остаться — машину выдаёт одинаковость пауз, а не их краткость."""
+    card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
+    vision = FakeVision(
+        screen_by_frame={'list': 'list', 'preview': 'preview'},
+        cards_by_frame={'list': [card]},
+        buttons_by_frame=DISPATCH,
+    )
+    cfg = Config()                       # с ЖИВЫМИ паузами, не с выключенными
+    cfg.join_taken_grace_s = 0.0
+    sleeps = []
+    join = JoinActions(FakeDriver(OPEN + ['list', 'preview']), vision, None, cfg,
+                       log=lambda *_: None, sleep=sleeps.append, cancel=Cancel())
+    assert join.run_once() == 'dispatched'
+    # Последняя пауза — после отправки (after_tap 1.5 с), она уже вне гонки.
+    race = sleeps[:-1]
+    assert race, "на гоночном пути обязана быть хотя бы одна пауза"
+    assert all(s <= cfg.delay_race[1] for s in race), race
 
 def test_no_calls_only_when_we_are_outside_join_ui():
     """Обратная сторона: иконки нет и UI сборов на экране нет — вот это
