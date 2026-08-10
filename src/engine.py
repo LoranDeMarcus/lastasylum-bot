@@ -6,6 +6,7 @@ from src.models import GameState, Action, nearest
 from src.cancel import Cancel
 from src.decide import decide
 from src.human import Human
+from src.version import VERSION
 
 class BotEngine:
     """Цикл фарма. Один отряд-на-задачу за раз (v1 последовательный):
@@ -42,6 +43,9 @@ class BotEngine:
         self.joins = 0
 
     def start(self):
+        # Версия — первой строкой лога: это самое ценное место для неё, лог и
+        # присылают человеку, когда бот ведёт себя не так, как ожидалось.
+        self.log(f"Last Asylum Bot {VERSION}")
         if self.cfg.dry_run:
             self.flasks = 10 ** 9        # в dry-run не открываем энергоокно
             self.log("Старт (DRY-RUN: тапов не будет).")

@@ -2,6 +2,11 @@
 import queue
 import threading
 from src.cancel import Cancel
+from src.version import VERSION
+
+# Заголовок окна — вынесен в константу, чтобы версия была видна человеку и
+# проверялась тестом без запуска tkinter (run_gui импортирует его лениво).
+GUI_TITLE = f"Last Asylum Bot {VERSION}"
 
 class BotController:
     """Владелец отмены: один Cancel уходит и в фабрику (там на нём строятся
@@ -51,7 +56,7 @@ def apply_strategy(cfg, value):
 def run_gui(controller, log_queue=None, cfg=None):
     import tkinter as tk
     root = tk.Tk()
-    root.title("Last Asylum Bot")
+    root.title(GUI_TITLE)
     log = tk.Text(root, height=18, width=60, state="disabled")
     log.pack(padx=8, pady=8)
 
