@@ -569,19 +569,11 @@ def test_run_returns_error_on_start_exception():
 # --- Режим «присоединяться к чужим штурмам» ---
 
 class FakeJoin:
-    def __init__(self, results=(), spend=0, stock=None):
+    def __init__(self, results=()):
         self.results = list(results)
         self.calls = []
-        self.flasks_used = 0
-        self.last_flask_stock = None
-        self._spend = spend
-        self._stock = stock
-    def run_once(self, refill=False):
-        self.calls.append(refill)
-        if refill:
-            self.flasks_used += self._spend
-            if self._stock is not None:
-                self.last_flask_stock = self._stock
+    def run_once(self):
+        self.calls.append(None)
         return self.results.pop(0) if self.results else "dispatched"
 
 def _mk_join_engine(join, active=0, energy=80, flasks=251, fourth=True):
@@ -623,12 +615,6 @@ def test_join_low_energy_stops():
     join = FakeJoin(["low_energy"])
     eng = _mk_join_engine(join)
     assert eng.one_iteration().type == 'stop'
-
-def test_join_reads_flask_stock_after_refill():
-    join = FakeJoin(["dispatched"], spend=2, stock=249)
-    eng = _mk_join_engine(join, flasks=251)
-    eng.one_iteration()
-    assert eng.flasks == 249                # «В наличии: N» точнее локального учёта
 
 def test_join_start_leaves_stock_unknown_until_read_from_game():
     """Как и у «Элитной скверны»: окно энергии видно только с превью

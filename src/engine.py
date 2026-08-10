@@ -248,33 +248,22 @@ class BotEngine:
             return None
 
         energy = self.vision.read_energy(img)
-        refill = self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
-        self.log(f"[отрядов={active}/{limit}] энергия={energy} склянок={self.flasks}"
-                 + (" (+рефилл разрешён)" if refill else "")
-                 + " -> ищу чужой сбор")
+        # Склянки и энергия тут ни при чём: вступление в чужой штурм бесплатное,
+        # энергия уходит только на СВОЙ штурм. Читаем её лишь для лога.
+        self.log(f"[отрядов={active}/{limit}] энергия={energy} -> ищу чужой сбор")
         if self.cfg.dry_run:
             self.sleep(1.0)
             return Action('join_assault')
 
-        used_before = self.join.flasks_used
-        res = self.join.run_once(refill=refill)
+        res = self.join.run_once()
         if res == 'stopped':
             self.log("  заход прерван по кнопке Стоп")
             return Action('stop')
         self.log(f"  Присоединение -> {res}")
 
-        spent = self.join.flasks_used - used_before
-        if self.join.last_flask_stock is not None:
-            self.flasks = self.join.last_flask_stock
-        elif spent and self.flasks is not None:
-            self.flasks = max(0, self.flasks - spent)
-        elif spent:
-            self.log("  остаток склянок прочитать не удалось — порог не действует")
-        if spent:
-            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
-
         if res == 'low_energy':
-            self.log("Энергии не хватает — стоп. Пополни энергию и запусти снова.")
+            self.log("Игра просит энергию за присоединение, хотя оно бесплатное "
+                     "— стоп, нужен человек.")
             return Action('stop')
         if res == 'no_calls':
             self.log("Сборов сейчас нет, жду.")

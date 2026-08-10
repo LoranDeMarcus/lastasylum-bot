@@ -1,7 +1,6 @@
 # src/join.py
 import time
 from src.cancel import Cancel
-from src.energy import EnergyRefill
 from src.human import Human
 from src.watchdog import safe_back
 
@@ -27,16 +26,6 @@ class JoinActions:
         self.sleep = sleep
         self.human = human if human is not None else Human(cfg, sleep=sleep)
         self.cancel = cancel if cancel is not None else Cancel()
-        self.energy = EnergyRefill(driver, vision, cfg, log=log, sleep=sleep,
-                                   human=self.human, cancel=self.cancel)
-
-    @property
-    def flasks_used(self):
-        return self.energy.flasks_used
-
-    @property
-    def last_flask_stock(self):
-        return self.energy.last_flask_stock
 
     def _wait_any(self, wanted, timeout_s=None):
         t = self.cfg.panel_verify_timeout_s if timeout_s is None else timeout_s
@@ -55,7 +44,7 @@ class JoinActions:
                   sleep=self.sleep, human=self.human)
         return "failed"
 
-    def run_once(self, refill=False):
+    def run_once(self):
         """Один заход. 'dispatched' | 'no_calls' | 'lost_window' |
         'low_energy' | 'failed' | 'stopped'."""
         if self.cancel.stopped():
@@ -77,9 +66,9 @@ class JoinActions:
         if self._wait_any({'list'}) is None:
             return "stopped" if self.cancel.stopped() else self._abort("вкладка «Событие» не открылась")
 
-        return self._wait_in_window(refill)
+        return self._wait_in_window()
 
-    def _wait_in_window(self, refill):
+    def _wait_in_window(self):
         """Сидим в окне, пока не вступим: подходящих сборов может не быть
         сейчас, но «Обновить» внизу — это ровно сигнал «кто-то запустил штурм».
         Выходим только по вступлению, Стопу или потере окна."""
@@ -102,7 +91,7 @@ class JoinActions:
                     self.sleep(self.human.poll_s(self.cfg.join_poll_interval_s))
                 continue
 
-            res = self._join(card, refill)
+            res = self._join(card)
             if res == "taken":
                 self.log("  места разобрали — пробую следующую карточку")
                 continue
@@ -120,7 +109,7 @@ class JoinActions:
             return c
         return None
 
-    def _join(self, card, refill):
+    def _join(self, card):
         """Тап по самому правому свободному слоту и отправка отряда."""
         if self.cancel.stopped():
             return "stopped"
@@ -133,19 +122,14 @@ class JoinActions:
             return "taken"          # остались в списке — слот заняли раньше нас
 
         if screen == 'preview_low_energy':
-            if not refill:
-                self.log("  энергии не хватает (кнопка «Увеличить энергию»)")
-                self.actions.close_preview()
-                self.human.after_tap(0.6)
-                return "low_energy"
-            if not self.energy.use_flask():
-                if self.cancel.stopped():
-                    return "stopped"
-                self.actions.close_preview()
-                self.human.after_tap(0.6)
-                return "low_energy"
-            if self._wait_any({'preview'}) is None:
-                return "stopped" if self.cancel.stopped() else self._abort("после склянки превью не вернулось")
+            # Присоединение бесплатное: энергию игра просит, только когда
+            # штурм запускаешь сам. Увидели «Увеличить энергию» — значит наше
+            # представление об игре разошлось с игрой. Склянку не тратим:
+            # закрываем превью и отдаём наверх, пусть зовут человека.
+            self.log("  превью просит энергию, хотя присоединение бесплатное")
+            self.actions.close_preview()
+            self.human.after_tap(0.6)
+            return "low_energy"
 
         if self.cancel.stopped():
             return "stopped"

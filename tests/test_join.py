@@ -203,17 +203,17 @@ def test_run_once_fails_and_backs_when_dialog_missing():
     assert actions.run_once() == 'failed'
     assert actions.driver.backs == 1
 
-def test_run_once_reports_low_energy_and_closes_preview():
-    """Энергии меньше стоимости отряда -> игра подменяет «Отправиться» на
-    «Увеличить энергию». Выходим чисто, без тапов по окну энергии и без BACK."""
+def test_low_energy_screen_calls_human_without_spending_flask():
+    """Присоединение бесплатное. Если игра просит энергию — это неожиданность:
+    склянку не тратим, превью закрываем, наверх отдаём 'low_energy'."""
     card = JoinCard(y=300, slots=[Box(900, 420, 60, 60)], seconds=40)
     vision = FakeVision(
-        screen_by_frame={'list': 'list', 'lowe': 'preview_low_energy'},
+        screen_by_frame={'list': 'list', 'low': 'preview_low_energy'},
         cards_by_frame={'list': [card]},
     )
-    acts = FakeActions()
-    actions, _ = _join(OPEN + ['list', 'lowe'], vision, actions=acts)
-    assert actions.run_once() == 'low_energy'
-    assert acts.closed == 1                       # превью закрыто
-    assert (900, 420) in actions.driver.taps       # тап по слоту всё же был
-    assert actions.driver.backs == 0               # BACK не нужен, вышли штатно
+    actions = FakeActions()
+    join = JoinActions(FakeDriver(OPEN + ['list', 'low']), vision, actions, _cfg(),
+                       log=lambda *_: None, sleep=lambda *_: None, cancel=Cancel())
+    assert join.run_once() == 'low_energy'
+    assert actions.closed == 1                 # превью закрыто
+    assert not hasattr(join, 'energy')         # рефилла в режиме join больше нет
