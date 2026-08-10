@@ -654,9 +654,11 @@ def test_join_low_energy_stops():
     assert eng.one_iteration().type == 'stop'
 
 def test_join_start_leaves_stock_unknown_until_read_from_game():
-    """Как и у «Элитной скверны»: окно энергии видно только с превью
-    отправки, поэтому на старте остаток неизвестен, а лог называет
-    именно режим присоединения (не «Поиск вора» и не голое число)."""
+    """Ветка start() для join нужна ровно затем, чтобы режим не проваливался
+    в «Поиск вора»: flasks остаётся None (склянки в этом режиме не при чём,
+    читать их неоткуда и незачем). Лог обязан называть режим присоединения и
+    НЕ обещать рефилл — рефилла тут нет, а первая строка живого лога врала
+    человеку именно про него."""
     lines = []
     join = FakeJoin()
     eng = _mk_join_engine(join)
@@ -664,3 +666,4 @@ def test_join_start_leaves_stock_unknown_until_read_from_game():
     eng.start()
     assert eng.flasks is None
     assert any("присоединение" in m.lower() for m in lines)
+    assert not any("рефилл" in m.lower() for m in lines)
