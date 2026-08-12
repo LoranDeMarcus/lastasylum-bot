@@ -24,21 +24,22 @@ class Vision:
                 return True
         return False
 
-    def find_targets(self, img):
-        """Мобы (плоские жёлтые черепа) и боссы (рогатые, того же тона).
-        Один жёлто-оранжевый тон ловит и тех и других; разделяем по aspect
+    def _target_blobs(self, img):
+        """(kind, cx, cy, w, h) для каждого жёлтого блоба-цели.
+
+        Общая часть find_targets и leveled_targets: одна маска, один фильтр
+        площади, одни HUD-зоны. Двух копий быть не должно — разъедутся.
+        Один жёлто-оранжевый тон ловит и мобов, и боссов; разделяем по aspect
         (ш/в): рога делают босса шире-чем-выше (aspect>=boss_aspect_min),
         плоский череп ~квадратный/выше (aspect<...). aspect зум-инвариантен.
-        Красные черепа (H≈8) в маску не попадают. HUD-зоны игнорируются.
-        Боссы бывают РАЗНОГО уровня — level тут номинальный, реальный тип
-        подтверждается панелью («Атака»/«Штурм») после тапа."""
+        Красные черепа (H≈8) в маску не попадают. HUD-зоны игнорируются."""
         H, W = img.shape[:2]
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array(self.cfg.mob_hsv_low, np.uint8),
                            np.array(self.cfg.mob_hsv_high, np.uint8))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        targets = []
+        out = []
         for c in contours:
             area = cv2.contourArea(c)
             if not (self.cfg.blob_min_area <= area <= self.cfg.blob_max_area):
@@ -50,11 +51,57 @@ class Vision:
             cx, cy = x + w // 2, y + h // 2
             if self._in_hud(cx, cy, W, H):
                 continue
-            if aspect >= self.cfg.boss_aspect_min:
-                targets.append(Target('boss', 0, cx, cy))   # рогатый = босс (ур. неизвестен)
-            else:
-                targets.append(Target('mob', 5, cx, cy))
-        return targets
+            out.append(('boss' if aspect >= self.cfg.boss_aspect_min else 'mob',
+                        cx, cy, w, h))
+        return out
+
+    def find_targets(self, img):
+        """Мобы (плоские жёлтые черепа) и боссы (рогатые, того же тона).
+        Боссы бывают РАЗНОГО уровня — level тут НОМИНАЛЬНЫЙ (0 для босса,
+        5 для моба), реальный уровень читается в leveled_targets из бейджа,
+        а тип босса подтверждается панелью («Атака»/«Штурм») после тапа."""
+        return [Target(kind, 0 if kind == 'boss' else 5, cx, cy)
+                for kind, cx, cy, _w, _h in self._target_blobs(img)]
+
+    def target_level(self, img, cx, cy, h):
+        """Уровень цели из серой пилюли ПОД иконкой, или None.
+
+        Ищем пилюлю в полосе, а не по фиксированному смещению: у рогатых
+        спрайт выше и бейдж уезжает вниз (замер: моб dy≈+52, рогатый dy≈+80).
+        Тот же приём, что спас строку склянки — искать по признаку, а не по
+        координате."""
+        bw, bh = self.cfg.target_badge_band
+        y0, x0 = cy + h // 2, max(0, cx - bw // 2)
+        band = img[y0:y0 + bh, x0:x0 + bw]
+        if band.size == 0:
+            return None
+        hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array(self.cfg.target_badge_hsv_low, np.uint8),
+                           np.array(self.cfg.target_badge_hsv_high, np.uint8))
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        minw, minh = self.cfg.target_badge_min_size
+        maxw, maxh = self.cfg.target_badge_max_size
+        best = None
+        for c in cnts:
+            x, y, w, ph = cv2.boundingRect(c)
+            if not (minw <= w <= maxw and minh <= ph <= maxh):
+                continue
+            if best is None or w * ph > best[2] * best[3]:
+                best = (x, y, w, ph)
+        if best is None:
+            return None
+        x, y, w, ph = best
+        return self.reader.read(img, (x0 + x, y0 + y, w, ph))
+
+    def leveled_targets(self, img):
+        """Цели с уровнем, прочитанным из бейджа.
+
+        Уровень из бейджа, а не из kind: kind считается по пропорциям и у
+        края экрана врёт (замер: череп ур.5 у баннера дал 'boss', а бейдж
+        всё равно прочёлся как «5»). Бейдж заодно отсекает мусор — у
+        оранжевых повозок его нет."""
+        return [Target(kind, self.target_level(img, cx, cy, h), cx, cy)
+                for kind, cx, cy, _w, h in self._target_blobs(img)]
 
     def panel_action(self, img):
         """Что за панель открылась после тапа по цели (verify попадания):
