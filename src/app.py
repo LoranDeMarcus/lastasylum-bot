@@ -7,6 +7,8 @@ from src.vision import Vision
 from src.actions import Actions
 from src.corruption import CorruptionActions
 from src.join import JoinActions
+from src.thief import ThiefActions
+from src.zoom import ZoomKeeper
 from src.engine import BotEngine
 from src.human import Human
 from src.watchdog import Watchdog
@@ -29,12 +31,17 @@ def main():
                                        sleep=cancel.sleep, human=human, cancel=cancel)
         join = JoinActions(driver, vision, actions, cfg, log=log_q.put,
                            sleep=cancel.sleep, human=human, cancel=cancel)
+        zoom = ZoomKeeper(driver, vision, cfg, log=log_q.put, sleep=cancel.sleep,
+                          human=human, cancel=cancel)
+        thief = ThiefActions(driver, vision, actions, cfg, zoom, log=log_q.put,
+                             sleep=cancel.sleep, human=human, cancel=cancel)
         # sleep через cancel: иначе сторож проспит свои 12 с ожидания
         # непрерываемым sleep и кнопка Стоп снова начнёт «залипать»
         watchdog = Watchdog(driver, vision, cfg, log=log_q.put,
                             sleep=cancel.sleep, human=human, cancel=cancel)
         return BotEngine(driver, vision, actions, cfg, log=log_q.put,
                          sleep=cancel.sleep, corruption=corruption, join=join,
+                         thief=thief, zoom=zoom,
                          human=human, cancel=cancel, watchdog=watchdog)
 
     controller = BotController(make_engine)

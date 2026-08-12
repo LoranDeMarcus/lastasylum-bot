@@ -100,3 +100,14 @@ def test_apply_strategy_ignores_unknown():
     cfg.strategy = "corruption"
     assert apply_strategy(cfg, "чепуха") == "corruption"
     assert cfg.strategy == "corruption"
+
+def test_apply_strategy_accepts_thief():
+    cfg = Config()
+    assert apply_strategy(cfg, "thief") == "thief"
+    assert cfg.strategy == "thief"
+
+def test_apply_strategy_ignores_unknown_mode():
+    """Лучше остаться в прежнем режиме, чем уронить движок чужой веткой."""
+    cfg = Config()
+    cfg.strategy = "thief"
+    assert apply_strategy(cfg, "нет такого") == "thief"
