@@ -848,12 +848,40 @@ def test_thief_zoom_stop_is_not_a_zoom_failure():
     """zoom.ensure() сам проверяет отмену внутри лестницы щипков и при
     Стопе тоже отдаёт False, не тапнув — снаружи это неотличимо от
     настоящей невозможности привестись. Движок обязан отличить их сам:
-    иначе Стоп попадёт в счётчик поломок зума, а лог соврёт про причину."""
+    иначе Стоп попадёт в счётчик поломок зума, а лог соврёт про причину.
+
+    Заодно Minor 2 ревью раунда 1: молчаливая остановка по Стопу читалась
+    бы человеком как «бот сам умер» — лог обязан назвать причину."""
     cancel = Cancel()
     eng = _thief_engine(ThiefFakeVision(), zoom=StoppingZoom(cancel), cancel=cancel)
+    lines = []
+    eng.log = lines.append
     action = eng.one_iteration()
     assert action is not None and action.type == "stop"
     assert eng._zoom_fails == 0            # не «зум не приводится», а Стоп
+    assert any("стоп" in m.lower() for m in lines)   # причина не осталась в тишине
+
+class FlakySkullZoom:
+    """Зум-ин («close») приводится штатно каждый раз, зум для выбора цели
+    («skull») — никогда. Регрессия на Important A ревью раунда 1: счётчик
+    _zoom_fails раньше обнулялся ПЕРВЫМ гейтом («close» всегда успешен) и
+    никогда не доходил до zoom_fail_limit, хотя второй гейт стабильно рвётся —
+    бот вечно щипал бы туда-сюда и молчал вместо честной остановки."""
+    def __init__(self):
+        self.calls = []
+    def ensure(self, want):
+        self.calls.append(want)
+        return want == "close"
+
+def test_thief_zoom_counter_survives_a_working_first_gate():
+    """close приводится штатно на КАЖДОЙ итерации, skull — никогда. Лимит
+    zoom_fail_limit обязан быть достигнут, а не растворяться в успехе
+    первого гейта (см. FlakySkullZoom)."""
+    v = ThiefFakeVision()
+    z = FlakySkullZoom()
+    eng = _thief_engine(v, zoom=z)
+    actions = [eng.one_iteration() for _ in range(eng.cfg.zoom_fail_limit)]
+    assert actions[-1] is not None and actions[-1].type == "stop"
 
 def test_thief_attack_stopped_is_not_a_failure():
     """thief.attack() вернул 'stopped' (кнопка нажата ПОСЕРЕДИНЕ захода,
@@ -875,3 +903,55 @@ def test_thief_search_stopped_is_not_a_failure():
     action = eng.one_iteration()
     assert action is not None and action.type == "stop"
     assert eng._no_progress == 0
+
+# --- Minor 1 ревью раунда 1: сброс _searches и skip_targets.clear() не был
+# покрыт НИ ОДНИМ тестом — мутационная проверка ревьюера убрала обе строки
+# без единого красного теста. По одному тесту на каждую из четырёх точек
+# сброса (их две пары: перед отправкой и в ветке «волна кончилась»). ---
+
+def test_thief_search_budget_resets_after_a_dispatch():
+    """Счётчик «Поисков подряд» обязан сброситься не только когда волна
+    кончилась (no_wave/no_event), но и после обычной отправки — иначе
+    следующая волна с тем же малым числом целей начинается уже с
+    подорванным бюджетом «Поиска», доставшимся от предыдущей."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t,
+                        cfg=_thief_cfg(thief_min_targets=3, thief_searches_per_wave=2))
+    for _ in range(3):     # 2 «Поиска» исчерпывают бюджет, 3-й бьёт цель
+        eng.one_iteration()
+    assert eng._searches == 0
+
+def test_thief_search_budget_resets_when_wave_ends():
+    """То же самое, но для ветки «волна кончилась»: бюджет «Поисков» не
+    должен переползать в следующую волну частично исчерпанным."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="searched")
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.one_iteration()                    # один «Поиск» -> searches=1
+    assert eng._searches == 1
+    t.search_result = "no_wave"
+    t.last_wave_seconds = 100
+    eng.one_iteration()                    # волна кончилась -> сон
+    assert eng._searches == 0
+
+def test_thief_skip_targets_reset_after_a_successful_search():
+    """«Поиск» переносит камеру — старые пропуски по экранным координатам
+    больше ничего не значат. Без сброса бот пропустил бы нового вора,
+    попавшего в старую ячейку сетки."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="searched")
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.skip_targets.add(("mob", 27, 45))   # старая метка, до «Поиска»
+    eng.one_iteration()
+    assert eng.skip_targets == set()
+
+def test_thief_skip_targets_reset_when_wave_ends():
+    """То же самое для ветки «волна кончилась»: старые пропуски не должны
+    пережить переход к следующей волне."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="no_wave", wave_seconds=100)
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.skip_targets.add(("mob", 3, 4))
+    eng.one_iteration()
+    assert eng.skip_targets == set()

@@ -103,6 +103,40 @@ class Vision:
         return [Target(kind, self.target_level(img, cx, cy, h), cx, cy)
                 for kind, cx, cy, _w, h in self._target_blobs(img)]
 
+    def _readable_badge_count(self, img):
+        """Сколько бейджей уровня читаются ГДЕ УГОДНО на карте — не только
+        под обнаруженными целями. В этой игре серая пилюля с числом висит
+        под ЛЮБЫМ объектом карты (кристаллами, деревьями, ресурсными
+        точками), а не только под золотыми ворами. Именно это и отличает
+        скулл-зум от пин-зума НАДЁЖНО: проверка «есть ли бейдж у уже
+        найденной ЦЕЛИ» на пустом участке карты (целей в кадре нет — штатный
+        конец волны, ради которого и существует «Поиск») всегда соврала бы
+        'far', даже стоя на правильном скулл-зуме.
+
+        Геометрия и цвет пилюли те же, что у target_level (см.
+        cfg.target_badge_*) — просто ищем по всей карте (без HUD-зон), а не
+        в узкой полосе под конкретной иконкой. «Читается» — контур матчит
+        размер пилюли И OCR реально распознал число: одной формы мало (на
+        пин-зуме форма-кандидат попадается, но не читается ни разу)."""
+        H, W = img.shape[:2]
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array(self.cfg.target_badge_hsv_low, np.uint8),
+                           np.array(self.cfg.target_badge_hsv_high, np.uint8))
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        minw, minh = self.cfg.target_badge_min_size
+        maxw, maxh = self.cfg.target_badge_max_size
+        count = 0
+        for c in cnts:
+            x, y, w, h = cv2.boundingRect(c)
+            if not (minw <= w <= maxw and minh <= h <= maxh):
+                continue
+            cx, cy = x + w // 2, y + h // 2
+            if self._in_hud(cx, cy, W, H):
+                continue
+            if self.reader.read(img, (x, y, w, h)) is not None:
+                count += 1
+        return count
+
     def panel_action(self, img):
         """Что за панель открылась после тапа по цели (verify попадания):
         'assault' если видна кнопка «Штурм» (босс), 'attack' если «Атака» (моб),
@@ -235,8 +269,12 @@ class Vision:
         целей нет). Один мягкий щипок = одна ступень, лестница обратима.
 
         Легенда карты уровень НЕ определяет: замер зонда показал, что она
-        видна и на скулл-зуме, и на пин-зуме. Различает их бейдж: на пин-зуме
-        его нет ни у одной иконки, включая ложные оранжевые повозки.
+        видна и на скулл-зуме, и на пин-зуме. Различает их ЧИСЛО читаемых
+        бейджей на всей карте (_readable_badge_count), а НЕ бейдж под уже
+        найденной целью: бейдж в этой игре висит под ЛЮБЫМ объектом карты
+        (кристаллы, деревья, ресурсные точки), а не только под ворами, и
+        конец волны (целей в кадре нет — штатное состояние) на скулл-зуме
+        не должен читаться как пин-зум только потому, что рядом нет цели.
 
         База проверяется ОТДЕЛЬНО (тот же приём, что и в classify_screen):
         легенды карты в базе нет, но якорь HUD энергии там тоже жив (замер
@@ -259,7 +297,8 @@ class Vision:
             return 'unknown'
         if not self.on_world_map(img):
             return 'close' if self.on_game_view(img) else 'unknown'
-        return 'skull' if any(t.level is not None for t in self.leveled_targets(img)) else 'far'
+        return ('skull' if self._readable_badge_count(img) >= self.cfg.map_zoom_badge_threshold
+                else 'far')
 
     def thief_tab_open(self, img):
         """Открыто ли окно «Событие» на вкладке «Поиск вора».

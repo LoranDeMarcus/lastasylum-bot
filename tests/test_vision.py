@@ -649,6 +649,30 @@ def test_map_zoom_unknown_on_modal():
     # соврать 'far'.
     assert v.map_zoom(cv2.imread("reference/45_thief_preview.png")) == "unknown"
 
+def test_map_zoom_skull_without_any_targets_still_reads_skull():
+    """Бейдж в этой игре висит под ЛЮБЫМ объектом карты (кристаллы, деревья,
+    ресурсные точки), не только под целями. Определение зума не должно
+    зависеть от того, есть ли в кадре хоть одна цель — иначе конец волны
+    (целей в кадре нет, штатное состояние, ради которого и существует
+    «Поиск») на скулл-зуме читался бы как пин-зум, и ensure('skull') после
+    удачного «Поиска» вечно щипал бы туда-сюда, ни разу не доехав до
+    реальной ступени (см. Important B ревью раунда 1).
+
+    Кадра «скулл-зум без единой цели» в репозитории нет — синтезируем:
+    берём настоящий скулл-зум и замазываем ТОЛЬКО иконки целей (даёт
+    _target_blobs) фоновым цветом. Бейджи под ними не трогаем — читаются
+    ли ИМЕННО они, независимо от икон, и есть суть проверки."""
+    cfg, v = _thief_vision()
+    img = cv2.imread("reference/40_thief_map_skull.png")
+    blobs = v._target_blobs(img)
+    assert len(blobs) >= 10          # сцена и правда богата целями до замазки
+    bg = (60, 140, 60)               # BGR-зелень: вне HSV обеих масок (цели/бейджи)
+    for _kind, cx, cy, w, h in blobs:
+        x0, y0 = max(0, cx - w // 2), max(0, cy - h // 2)
+        img[y0:y0 + h, x0:x0 + w] = bg
+    assert v.leveled_targets(img) == []     # целей действительно не осталось
+    assert v.map_zoom(img) == "skull"
+
 def test_thief_tab_open():
     cfg, v = _thief_vision()
     assert v.thief_tab_open(cv2.imread("reference/43_thief_tab.png"))
