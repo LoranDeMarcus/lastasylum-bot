@@ -1,6 +1,6 @@
 from config import Config
 from src.cancel import Cancel
-from src.models import Box
+from src.models import Box, Target
 from src.thief import ThiefActions
 
 class FakeDriver:
@@ -193,3 +193,52 @@ def test_search_tab_found_by_template_but_never_opens_is_failure():
     t, d = _thief(["map", "map", "map"], v)
     assert t.search() == "failed"
     assert d.backs == 1
+
+def test_attack_dispatches_thief():
+    """Панель открылась с первого тапа — так бывает (замер §0.1)."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("preview", "dispatch"): Box(536, 1358, 410, 100),
+    })
+    t, d = _thief(["panel", "panel", "preview", "preview"], v)
+    assert t.attack(Target("mob", 5, 411, 1184)) == "dispatched"
+    assert (411, 1184) in d.taps          # тап по цели
+    assert (425, 1630) in d.taps          # слот отряда 2
+    assert (536, 1358) in d.taps          # «Отправиться»
+
+def test_attack_retaps_center_when_first_tap_zoomed():
+    """Промах по мелкой иконке зумит карту и центрирует цель -> второй тап."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("preview", "dispatch"): Box(536, 1358, 410, 100),
+    })
+    t, d = _thief(["zoomed", "panel", "panel", "preview", "preview"], v)
+    assert t.attack(Target("mob", 5, 411, 1184)) == "dispatched"
+    cfg = _cfg()
+    assert (cfg.screen_w // 2, cfg.screen_h // 2 + cfg.zoom_center_tap_offset_y) in d.taps
+
+def test_attack_gives_up_when_panel_never_opens():
+    v = FakeVision(buttons_by_frame={})
+    t, d = _thief(["zoomed", "zoomed", "zoomed"], v)
+    assert t.attack(Target("mob", 5, 411, 1184)) == "missed"
+
+def test_attack_skips_plain_mob():
+    """Панель есть, но это не «Золотой вор» — закрываем и не тратим энергию."""
+    class NotThief(FakeVision):
+        def thief_panel(self, img):
+            return False
+    v = NotThief(buttons_by_frame={("panel", "attack"): Box(537, 1277, 120, 120)})
+    t, d = _thief(["panel", "panel"], v)
+    assert t.attack(Target("mob", 5, 411, 1184)) == "not_thief"
+    assert t.actions.closed == 1
+    assert (537, 1277) not in d.taps       # «Атака» НЕ нажата
+
+def test_attack_reports_low_energy_when_refill_not_allowed():
+    """Игра подменила «Отправиться» на «Увеличить энергию», склянки нельзя."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("low", "boost_energy"): Box(548, 1367, 300, 88),
+    })
+    t, d = _thief(["panel", "panel", "low", "low"], v)
+    assert t.attack(Target("mob", 5, 411, 1184), refill=False) == "low_energy"
+    assert t.actions.closed == 1

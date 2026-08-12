@@ -1,6 +1,7 @@
 # src/thief.py
 import time
 from src.cancel import Cancel
+from src.energy import EnergyRefill
 from src.human import Human
 from src.watchdog import safe_back
 
@@ -29,6 +30,8 @@ class ThiefActions:
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
         self.last_wave_seconds = None
+        self.energy = EnergyRefill(driver, vision, cfg, log=log, sleep=sleep,
+                                   human=self.human, cancel=self.cancel)
 
     def _safe_back(self):
         # логика одна на весь проект (нужна и сторожу) -> живёт в watchdog
@@ -118,3 +121,117 @@ class ThiefActions:
         self.log(f"  {why} -> BACK")
         self._safe_back()
         return "failed"
+
+    @property
+    def flasks_used(self):
+        return self.energy.flasks_used
+
+    @property
+    def last_flask_stock(self):
+        return self.energy.last_flask_stock
+
+    def _select_squad(self):
+        """Выбрать отряд 2 в превью.
+
+        Своя копия, а не Actions._select_squad: лезть в приватный метод
+        соседнего класса — способ намертво связать два режима. Координата
+        слота одна и та же, она в cfg.squad_slots."""
+        sx, sy = self.vision.squad_slot(self.cfg.mob_squad)
+        self.driver.tap(self.cfg.tap_box("squad_slot", (sx, sy)))
+        self.human.after_tap(0.4)
+
+    def _open_panel(self, target):
+        """Тап по цели и ожидание панели. Box кнопки «Атака» или None.
+
+        Двухтапно, но ВТОРОЙ тап условный: замер §0.1 показал, что панель
+        иногда открывается с первого раза, и безусловный второй тап закрыл бы
+        уже открытую панель. Промах по мелкой иконке зумит карту и
+        центрирует цель — тогда добиваем тапом по центру."""
+        self.driver.tap(self.cfg.tap_box("target", (target.x, target.y)))
+        self.human.after_tap(1.6)
+        pos = self.vision.find_button(self.driver.screenshot(), "attack")
+        if pos is not None:
+            return pos
+        if self.cancel.stopped():
+            return None
+        self.log("  панели нет -> карта зазумилась, добиваю тапом по центру")
+        self.driver.tap(self.cfg.tap_box(
+            "target", (self.cfg.screen_w // 2,
+                       self.cfg.screen_h // 2 + self.cfg.zoom_center_tap_offset_y)))
+        self.human.after_tap(1.6)
+        return self.vision.find_button(self.driver.screenshot(), "attack")
+
+    def attack(self, target, refill=False):
+        """Один удар по цели: панель -> подтверждение вора -> «Атака» ->
+        отряд 2 -> «Отправиться».
+
+        refill — разрешено ли потратить фиолетовую склянку +50, если игра
+        сказала, что энергии не хватает (решение принимает движок по порогу).
+
+        'dispatched' | 'not_thief' | 'missed' | 'failed' | 'low_energy' | 'stopped'."""
+        if self.cancel.stopped():
+            return "stopped"
+        pos = self._open_panel(target)
+        if pos is None:
+            return "stopped" if self.cancel.stopped() else "missed"
+
+        # Цель подтверждается ЗДЕСЬ, а не по иконке: на отзуме Золотой вор и
+        # рядовой моб ур.5 — один и тот же жёлтый череп с бейджем «5». Тап по
+        # цели бесплатен, платит только «Отправиться», значит проверка ничего
+        # не стоит, а ошибка стоила бы 10 энергии и пустого захода.
+        if self.cfg.thief_require_title and not self.vision.thief_panel(self.driver.screenshot()):
+            self.log("  это не Золотой вор, а обычный моб ур.5 -> пропускаю")
+            self.actions.close_preview()
+            self.human.after_tap(0.6)
+            return "not_thief"
+
+        if self.cancel.stopped():
+            return "stopped"
+        self.driver.tap(pos)
+        self.human.after_tap(2.0)
+
+        img = self.driver.screenshot()
+        send = self.vision.find_button(img, "dispatch")
+        if send is None:
+            if self.vision.find_button(img, "boost_energy") is not None:
+                return self._low_energy(refill)
+            # между тапом «Атака» и этим кадром была настоящая пауза (2 с) —
+            # окно, где человек мог успеть нажать Стоп; не спутать с реальным
+            # провалом открытия превью (см. предупреждение задачи о таком баге)
+            return "stopped" if self.cancel.stopped() else self._abort("превью отправки не открылось")
+
+        # Гейт «Лёгкая победа» выключен намеренно: замер показал, что игра
+        # подменяет эту строку на «Ваши высокоуровневые солдаты еще не
+        # достигли предела», и гейт пропустил бы заведомо проходимого вора
+        # (мощь 13M против 670K).
+        self._select_squad()
+        send = self.vision.find_button(self.driver.screenshot(), "dispatch") or send
+        if self.cancel.stopped():
+            return "stopped"
+        self.driver.tap(send)
+        self.human.after_tap(1.5)
+        return "dispatched"
+
+    def _low_energy(self, refill):
+        """Энергии меньше стоимости: игра подменила «Отправиться» на
+        «Увеличить энергию». Она же — вход в окно энергии."""
+        if not refill:
+            self.log("  энергии не хватает (кнопка «Увеличить энергию»)")
+            self.actions.close_preview()
+            self.human.after_tap(0.6)
+            return "low_energy"
+        if not self.energy.use_flask():
+            if self.cancel.stopped():
+                return "stopped"
+            self.actions.close_preview()
+            self.human.after_tap(0.6)
+            return "low_energy"
+        send = self.vision.find_button(self.driver.screenshot(), "dispatch")
+        if send is None:
+            # use_flask() внутри тапал и спал — то же окно для Стопа, что и
+            # выше: не спутать отмену с настоящим провалом возврата превью
+            return "stopped" if self.cancel.stopped() else self._abort("после склянки превью не вернулось")
+        self._select_squad()
+        self.driver.tap(send)
+        self.human.after_tap(1.5)
+        return "dispatched"
