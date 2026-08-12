@@ -86,7 +86,12 @@ def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
     return eng
 
 def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=None):
-    cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True, strategy="thief")
+    # strategy="map": путь этих тестов выбирается флагом use_search_strategy,
+    # а не значением strategy (сам _search_iteration его не читает). Раньше
+    # тут стояло "thief" как ничего не значащая заглушка — теперь у этого
+    # значения появился свой маршрут в one_iteration(), и коллизия увела бы
+    # эти тесты в _thief_iteration() без переданных thief=/zoom=.
+    cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True, strategy="map")
     eng = BotEngine(driver=FakeDriver(),
                     vision=FakeVision(energy=energy, targets=targets, squad=squad),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
@@ -680,3 +685,193 @@ def test_join_start_leaves_stock_unknown_until_read_from_game():
     assert eng.flasks is None
     assert any("присоединение" in m.lower() for m in lines)
     assert not any("рефилл" in m.lower() for m in lines)
+
+# --- Режим «Поиск вора» ---
+
+class ThiefFakeDriver:
+    def __init__(self):
+        self.taps = []
+    def screenshot(self):
+        return "frame"
+    def tap(self, target):
+        self.taps.append(tuple(target.center) if hasattr(target, "center") else tuple(target))
+    def back(self):
+        pass
+
+class ThiefFakeVision:
+    """Кадр один, ответы фиксированы: движок тут проверяется на решения,
+    а не на распознавание — оно своё в tests/test_vision.py."""
+    def __init__(self, squad="idle", leveled=(), energy=120):
+        self.squad = squad
+        self.leveled = list(leveled)
+        self.energy = energy
+    def squad_state(self, img):
+        return self.squad
+    def leveled_targets(self, img):
+        return self.leveled
+    def read_energy(self, img):
+        return self.energy
+
+class ThiefFakeActions:
+    def close_preview(self):
+        pass
+
+class FakeThief:
+    def __init__(self, search_result="searched", attack_result="dispatched",
+                 wave_seconds=None):
+        self.search_result = search_result
+        self.attack_result = attack_result
+        self.last_wave_seconds = wave_seconds
+        self.flasks_used = 0
+        self.last_flask_stock = None
+        self.calls = []
+    def search(self):
+        self.calls.append("search")
+        return self.search_result
+    def attack(self, target, refill=False):
+        self.calls.append(("attack", target.x, target.y, refill))
+        return self.attack_result
+
+class FakeZoom:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
+    def ensure(self, want):
+        self.calls.append(want)
+        return self.ok
+
+def _thief_cfg(**over):
+    cfg = Config()
+    cfg.strategy = "thief"
+    cfg.human_enabled = False        # без случайных пауз тест детерминирован
+    cfg.thief_min_targets = 1        # по умолчанию БЬЁМ; ветку поиска тесты
+    for k, v in over.items():        # включают явно, подняв порог
+        setattr(cfg, k, v)
+    return cfg
+
+def _thief_engine(vision, thief=None, zoom=None, cfg=None, sleeps=None, cancel=None):
+    eng = BotEngine(ThiefFakeDriver(), vision, ThiefFakeActions(),
+                    cfg or _thief_cfg(), log=lambda m: None,
+                    sleep=(sleeps.append if sleeps is not None else (lambda s: None)),
+                    thief=thief or FakeThief(), zoom=zoom or FakeZoom(),
+                    cancel=cancel)
+    eng.flasks = 500                 # выше порога: рефилл разрешён, стопа нет
+    return eng
+
+def test_thief_waits_while_squad_marching():
+    """Гейт читается на ЗУМ-ИНЕ: виджета «Отряд» на отзуме нет."""
+    v = ThiefFakeVision(squad="marching", leveled=[Target("mob", 5, 400, 900)])
+    z = FakeZoom()
+    eng = _thief_engine(v, zoom=z)
+    assert eng.one_iteration() is None
+    assert z.calls == ["close"]           # до отзума дело не дошло
+
+def test_thief_attacks_nearest_level_five():
+    """Уровень берётся из бейджа: цель ур.30 рядом с центром не трогаем."""
+    v = ThiefFakeVision(leveled=[
+        Target("mob", 5, 100, 100),       # далеко от центра
+        Target("mob", 5, 540, 900),       # ближе к центру
+        Target("mob", 30, 545, 905),      # ещё ближе, но не тот уровень
+    ])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert ("attack", 540, 900, True) in t.calls
+
+def test_thief_searches_when_too_few_targets():
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.one_iteration()
+    assert t.calls == ["search"]
+
+def test_thief_attacks_anyway_after_search_budget_spent():
+    """Редкая волна не должна давать вечный цикл «ищу — мало — ищу» при
+    живой цели перед носом."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t,
+                        cfg=_thief_cfg(thief_min_targets=3, thief_searches_per_wave=2))
+    for _ in range(3):
+        eng.one_iteration()
+    assert t.calls.count("search") == 2
+    assert ("attack", 540, 900, True) in t.calls
+
+def test_thief_not_a_thief_is_not_a_failure():
+    """Обычный моб ур.5 — ожидаемый исход неразличимых иконок, а не провал:
+    иначе три подряд таких моба выключили бы бота на ровном месте."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(attack_result="not_thief")
+    eng = _thief_engine(v, thief=t)
+    for _ in range(5):
+        eng.one_iteration()
+    assert eng._no_progress == 0
+    assert len(eng.skip_targets) == 1     # цель помечена, второй раз не берём
+
+def test_thief_stops_when_zoom_unfixable():
+    """Первая осечка — ждём, лимит подряд — стоп. Молча работать на чужом
+    зуме нельзя: детекция площадей врёт."""
+    v = ThiefFakeVision()
+    eng = _thief_engine(v, zoom=FakeZoom(ok=False))
+    actions = [eng.one_iteration() for _ in range(eng.cfg.zoom_fail_limit)]
+    assert actions[0] is None
+    assert actions[-1].type == "stop"
+
+def test_thief_sleeps_until_next_wave():
+    """Таймер волны 666 с -> спим столько, а не жмём «Поиск» вхолостую."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="no_wave", wave_seconds=666)
+    sleeps = []
+    eng = _thief_engine(v, thief=t, sleeps=sleeps)
+    assert eng.one_iteration() is None
+    assert max(sleeps) >= 600
+
+# --- Регрессия: Стоп не должен считаться провалом (класс бага, который
+# ревью в этом плане уже ловило дважды в src/thief.py — коммиты 33cb819 и
+# 1a54392). Единственный тест на отказ моделирует «шаг сам не удался»
+# (FakeThief(...="failed") / FakeZoom(ok=False)) — это ДРУГОЕ, чем «шаг
+# прервали Стопом», и первое не доказывает отсутствие второго. ---
+
+class StoppingZoom:
+    """Как FakeZoom(ok=False), но имитирует то, что видит ZoomKeeper внутри
+    лестницы щипков: Стоп ловится ПОСЕРЕДИНЕ приведения зума, и он же вернул
+    False, не тапнув (см. tests/test_thief.py::StoppingZoom, тот же приём)."""
+    def __init__(self, cancel):
+        self.cancel = cancel
+        self.calls = []
+    def ensure(self, want):
+        self.calls.append(want)
+        self.cancel.set()
+        return False
+
+def test_thief_zoom_stop_is_not_a_zoom_failure():
+    """zoom.ensure() сам проверяет отмену внутри лестницы щипков и при
+    Стопе тоже отдаёт False, не тапнув — снаружи это неотличимо от
+    настоящей невозможности привестись. Движок обязан отличить их сам:
+    иначе Стоп попадёт в счётчик поломок зума, а лог соврёт про причину."""
+    cancel = Cancel()
+    eng = _thief_engine(ThiefFakeVision(), zoom=StoppingZoom(cancel), cancel=cancel)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._zoom_fails == 0            # не «зум не приводится», а Стоп
+
+def test_thief_attack_stopped_is_not_a_failure():
+    """thief.attack() вернул 'stopped' (кнопка нажата ПОСЕРЕДИНЕ захода,
+    не сам заход не удался) -> движок обязан остановиться, не наращивая
+    счётчик провалов отправки."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(attack_result="stopped")
+    eng = _thief_engine(v, thief=t)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._no_progress == 0
+
+def test_thief_search_stopped_is_not_a_failure():
+    """thief.search() вернул 'stopped' -> тоже стоп без наращивания
+    счётчика провалов («Поиск» прерван Стопом, а не сам не получился)."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="stopped")
+    eng = _thief_engine(v, thief=t)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._no_progress == 0
