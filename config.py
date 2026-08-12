@@ -97,22 +97,14 @@ class Config:
     # (на карте vs зум-ин базы) -> ищем слово в полосе, а не в узком боксе.
     squad_state_region: tuple = (120, 320, 360, 140)
     squad_state_threshold: float = 0.6
-    # --- «Поиск вора» (Особое событие): near-base мобы, короткий марш ---
-    event_button_xy: tuple = (970, 430)        # «Особое событие» (правый столбец, зум-ин)
-    search_thief_tab_xy: tuple = (450, 205)    # вкладка «Поиск вора»
-    search_button_xy: tuple = (285, 1815)      # кнопка «Поиск»
-    search_result_xy: tuple = (540, 965)       # найденный моб центрируется сюда
-    # «Поиск» не даёт панель моба столько раз подряд -> стоп (событие кончилось,
-    # вёрстка иная, экран не тот) — чтобы не тапать вслепую по меню
+    # Столько провалов отправки подряд (в любом режиме — скверна, join, вор)
+    # -> стоп, дальше действовать вслепую нельзя, нужен человек.
     max_search_failures: int = 3
     # Слать следующего сразу как «Возвращение» (True) или ждать полного возврата (False)
     send_next_on_return: bool = True
 
     # --- Режим «Поиск вора» (Золотые воры, событие) ---
     # strategy: "corruption" | "join" | "thief" | "map"
-    # Блок ниже — новая схема имён для этого режима; старые поля выше
-    # (event_button_xy и др.) пока используют actions.py/engine.py и не
-    # трогаются здесь — их удаление отдельной задачей, чтобы диффы не путались.
     thief_level: int = 5                       # уровень Золотого вора
     thief_min_targets: int = 3                 # целей меньше -> жмём «Поиск» снова
     thief_searches_per_wave: int = 3           # столько «Поисков» без целей -> волна выбита
@@ -141,9 +133,6 @@ class Config:
     template_match_threshold: float = 0.8
     jitter_px: int = 4
     stop_file: str = "STOP"
-    # Стратегия фарма: True = «Поиск вора» (near-base мобы, короткий марш, весь
-    # цикл в зум-ине, гейт по виджету отряда); False = старая детекция на отзуме.
-    use_search_strategy: bool = True
     # dry-run: движок только логирует решения, НЕ тапает (см. engine)
     dry_run: bool = False
     # verify после тапа по цели: ждать панель «Атака»/«Штурм» столько секунд
@@ -168,8 +157,7 @@ class Config:
     max_pinch_recover: int = 3
 
     # --- Режим «Элитная скверна» (штурм боссов через диалог поиска) ---
-    # strategy: "corruption" | "thief" | "map" | "join". Оставлено рядом с
-    # use_search_strategy для обратной совместимости старых раннеров.
+    # strategy: "corruption" | "thief" | "map" | "join"
     strategy: str = "corruption"
     corruption_search_icon_xy: tuple = (78, 1530)   # лупа в левом столбце -> диалог поиска
     corruption_tab_xy: tuple = (843, 962)           # вкладка «Элитная скверна» (тап безусловный)
@@ -263,9 +251,6 @@ class Config:
         "exit_cancel": (200, 72),
         "preview_close": (400, 160),
         "squad_slot": (180, 120),
-        "event_button": (120, 120),
-        "search_thief_tab": (200, 64),
-        "search_button": (240, 84),
         "thief_event_button": (120, 120),
         "thief_tab": (240, 90),
         "thief_search": (400, 88),

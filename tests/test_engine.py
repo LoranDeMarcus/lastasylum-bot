@@ -7,10 +7,9 @@ from src.models import GameState, Target
 from src.engine import BotEngine
 
 class FakeActions:
-    def __init__(self, search_result="dispatched", attack_result="dispatched"):
+    def __init__(self, attack_result="dispatched"):
         self.calls = []
         self._flasks = 300
-        self._search_result = search_result
         self._attack_result = attack_result
         self.last_flasks = None
         self.attack_kwargs = None
@@ -29,11 +28,6 @@ class FakeActions:
         return self._attack_result
     def assault_boss(self, t):
         self.calls.append(('assault', t)); return "dispatched"
-    def search_and_attack_mob(self, refill=False, want_flasks=False):
-        self.calls.append(('search', refill, want_flasks))
-        if want_flasks or refill:
-            self.last_flasks = self._flasks
-        return self._search_result
 
 class FakeDriver:
     def __init__(self, boom=False):
@@ -76,24 +70,10 @@ class FakeVision:
 
 def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
                dry_run=False, driver=None, on_map=True):
-    # старые тесты проверяют map-based путь -> отключаем и search, и скверну
-    cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run,
-                 use_search_strategy=False, strategy="map")
+    # старые тесты проверяют map-based путь -> strategy="map" отключает скверну/join/вора
+    cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run, strategy="map")
     eng = BotEngine(driver=driver or FakeDriver(),
                     vision=FakeVision(energy, targets, squad, on_map),
-                    actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
-    eng.flasks = flasks
-    return eng
-
-def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=None):
-    # strategy="map": путь этих тестов выбирается флагом use_search_strategy,
-    # а не значением strategy (сам _search_iteration его не читает). Раньше
-    # тут стояло "thief" как ничего не значащая заглушка — теперь у этого
-    # значения появился свой маршрут в one_iteration(), и коллизия увела бы
-    # эти тесты в _thief_iteration() без переданных thief=/zoom=.
-    cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True, strategy="map")
-    eng = BotEngine(driver=FakeDriver(),
-                    vision=FakeVision(energy=energy, targets=targets, squad=squad),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
     eng.flasks = flasks
     return eng
@@ -313,133 +293,6 @@ def test_unreadable_stock_is_logged_not_silently_ignored():
     eng.one_iteration()
     assert any("прочитать не удалось" in s for s in lines)
 
-def test_search_strategy_searches_when_idle():
-    act = FakeActions()
-    eng = _mk_search_engine(act, squad='idle')
-    eng.one_iteration()
-    assert act.calls[0][0] == 'search'       # ищем вора и отправляем
-
-def test_search_start_does_not_open_energy_window_from_map():
-    """С карты «+» тапнет кнопку дома -> в режиме поиска склянки на старте НЕ
-    читаем (прочитаем пиггибеком на первом превью отправки)."""
-    act = FakeActions()
-    eng = _mk_search_engine(act, flasks=None)
-    eng.start()
-    assert ('flasks_left',) not in act.calls
-    assert eng.flasks is None
-
-def test_search_reads_flasks_on_first_dispatch():
-    act = FakeActions(); act._flasks = 240
-    eng = _mk_search_engine(act, flasks=None)
-    eng.one_iteration()
-    assert act.calls == [('search', False, True)]   # refill=False, want_flasks=True
-    assert eng.flasks == 240
-
-def test_search_requests_refill_when_energy_low():
-    act = FakeActions()
-    eng = _mk_search_engine(act, energy=12)         # < energy_refill_threshold
-    eng.one_iteration()
-    assert act.calls == [('search', True, False)]
-
-def test_search_stops_when_flasks_below_threshold():
-    act = FakeActions()
-    eng = _mk_search_engine(act, flasks=100)        # < flask_stop_threshold
-    a = eng.one_iteration()
-    assert a.type == 'stop'
-    assert act.calls == []                          # без тапов
-
-def test_search_stops_after_repeated_failures():
-    """«Поиск» перестал давать панель (событие кончилось/вёрстка иная) —
-    не долбимся вслепую, а останавливаемся и зовём человека."""
-    act = FakeActions(search_result="no_thief")
-    eng = _mk_search_engine(act)
-    for _ in range(eng.cfg.max_search_failures - 1):
-        assert eng.one_iteration().type != 'stop'
-    assert eng.one_iteration().type == 'stop'
-
-def test_search_failure_counter_resets_after_success():
-    act = FakeActions(search_result="no_thief")
-    eng = _mk_search_engine(act)
-    for _ in range(eng.cfg.max_search_failures - 1):
-        eng.one_iteration()                         # провалы, но ещё не стоп
-    act._search_result = "dispatched"
-    eng.one_iteration()                             # успех -> счётчик сброшен
-    act._search_result = "no_thief"
-    assert eng.one_iteration().type != 'stop'       # снова 1 провал подряд
-
-def test_search_strategy_waits_when_marching():
-    act = FakeActions()
-    eng = _mk_search_engine(act, squad='marching')
-    a = eng.one_iteration()
-    assert a is None
-    assert act.calls == []                   # отряд занят -> не ищем
-
-# --- Гибрид: фарм видимых соседей до нового «Поиска вора» ---
-
-def test_search_attacks_visible_neighbor_instead_of_searching():
-    act = FakeActions()
-    mob = Target('mob', 5, 460, 810)         # виден на текущем виде
-    eng = _mk_search_engine(act, targets=[mob])
-    eng.one_iteration()
-    assert ('attack', mob) in act.calls               # фармим соседа
-    assert not any(c[0] == 'search' for c in act.calls)   # без нового «Поиска»
-
-def test_search_falls_back_to_thief_when_no_neighbor_mobs():
-    act = FakeActions()
-    eng = _mk_search_engine(act, targets=[])          # соседей не видно
-    eng.one_iteration()
-    assert any(c[0] == 'search' for c in act.calls)
-    assert not any(c[0] == 'attack' for c in act.calls)
-
-def test_search_picks_neighbor_nearest_to_center():
-    act = FakeActions()
-    far = Target('mob', 5, 100, 200)
-    near = Target('mob', 5, 470, 780)        # центр экрана (450, 800)
-    eng = _mk_search_engine(act, targets=[far, near])
-    eng.one_iteration()
-    attacked = [c[1] for c in act.calls if c[0] == 'attack']
-    assert attacked == [near]                # ближайший к центру = короткий марш
-
-def test_search_ignores_boss_neighbor_and_searches():
-    act = FakeActions()
-    boss = Target('boss', 0, 460, 810)       # рогатый / ложный UI -> не моб
-    eng = _mk_search_engine(act, targets=[boss])
-    eng.one_iteration()
-    assert not any(c[0] == 'attack' for c in act.calls)   # босса соседом не фармим
-    assert any(c[0] == 'search' for c in act.calls)       # мобов нет -> поиск
-
-def test_search_reads_flasks_on_neighbor_dispatch():
-    act = FakeActions(); act._flasks = 240
-    mob = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, flasks=None, targets=[mob])
-    eng.one_iteration()
-    assert act.attack_kwargs == (False, True)   # refill=False, want_flasks=True
-    assert eng.flasks == 240
-
-def test_search_requests_refill_on_neighbor_when_energy_low():
-    act = FakeActions()
-    mob = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, energy=12, targets=[mob])   # < energy_refill_threshold
-    eng.one_iteration()
-    assert act.attack_kwargs == (True, False)
-
-def test_search_skips_phantom_neighbor_after_failed_attack():
-    act = FakeActions(attack_result="wrong_panel")
-    phantom = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, targets=[phantom])
-    eng.one_iteration()
-    assert eng._target_key(phantom) in eng.skip_targets   # не выбираем снова
-
-def test_search_stops_after_no_progress_across_neighbor_and_search():
-    """Промах по соседу (-> skip) и провал «Поиска» одинаково копят
-    «нет прогресса»; после порога — стоп и зов человека."""
-    act = FakeActions(search_result="no_thief", attack_result="missed")
-    mob = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, targets=[mob])
-    results = [eng.one_iteration() for _ in range(eng.cfg.max_search_failures)]
-    assert results[-1].type == 'stop'
-    assert all(r is None or r.type != 'stop' for r in results[:-1])
-
 def test_iteration_attacks_mob():
     act = FakeActions()
     mob = Target('mob', 5, 460, 810)
@@ -552,7 +405,7 @@ def test_read_state_handles_none_energy():
 def test_start_reads_flask_count():
     act = FakeActions(); act._flasks = 200
     eng = BotEngine(driver=None, vision=None, actions=act,
-                    cfg=Config(use_search_strategy=False, strategy="map"),
+                    cfg=Config(strategy="map"),
                     log=lambda m: None, sleep=lambda s: None)
     eng.start()
     assert eng.flasks == 200
@@ -573,7 +426,7 @@ def test_run_returns_error_on_start_exception():
             raise NotImplementedError("no OCR")
     logs = []
     eng = BotEngine(driver=None, vision=None, actions=BoomActions(),
-                    cfg=Config(use_search_strategy=False, strategy="map"),
+                    cfg=Config(strategy="map"),
                     log=logs.append, sleep=lambda s: None)
     reason = eng.run(threading.Event())
     assert reason == 'error'

@@ -39,7 +39,7 @@ class BotEngine:
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
-        self._no_progress = 0       # подряд итераций без отправки (сосед-промах / провал «Поиска»)
+        self._no_progress = 0       # подряд итераций без отправки (в любом активном режиме)
         self._zoom_fails = 0        # подряд неудачных приведений зума
         self._searches = 0          # «Поисков» подряд без набора целей
         # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
@@ -63,8 +63,9 @@ class BotEngine:
                      "из игры после первого рефилла.")
         elif self.cfg.strategy == "join":
             # flasks остаётся None намеренно: ветка нужна лишь затем, чтобы
-            # режим не проваливался в use_search_strategy. Ни энергия, ни
-            # склянки в этом режиме не тратятся, читать их неоткуда и незачем.
+            # режим не провалился в ветку по умолчанию (map), которая читает
+            # flasks_left() через OCR карты. Ни энергия, ни склянки в этом
+            # режиме не тратятся, читать их неоткуда и незачем.
             self.flasks = None
             self.log("Старт (присоединение к чужим штурмам). Энергия и склянки "
                      "в этом режиме не тратятся.")
@@ -74,11 +75,6 @@ class BotEngine:
             self.flasks = None
             self.log("Старт («Поиск вора»). Остаток склянок прочитаю "
                      "из игры после первого рефилла.")
-        elif self.cfg.use_search_strategy:
-            # окно энергии открывается только с превью отправки; с карты «+»
-            # тапнет кнопку дома -> склянки прочитаем на первом же превью
-            self.flasks = None
-            self.log("Старт («Поиск вора»). Склянки прочитаем на первом превью.")
         else:
             self.flasks = self.actions.flasks_left()
             self.log(f"Старт. Склянок: {self.flasks}")
@@ -104,69 +100,6 @@ class BotEngine:
     @staticmethod
     def _target_key(t):
         return (t.kind, round(t.x / 20), round(t.y / 20))
-
-    def _neighbor_mobs(self, img):
-        """Мобы, видимые на текущем виде у базы (после «Поиска» камера там).
-        Только kind=='mob' (рогатых боссов и ложные UI-иконки, что классятся
-        как 'boss', не фармим), без помеченных skip_targets (фантомы/промахи)."""
-        return [t for t in self.vision.find_targets(img)
-                if t.kind == 'mob' and self._target_key(t) not in self.skip_targets]
-
-    def _search_iteration(self):
-        """Гибрид «Поиск вора» + фарм соседей: ждём свободный отряд по виджету
-        -> если на текущем виде виден моб-сосед, шлём отряд 2 на ближайшего к
-        центру (короткий марш); соседей нет -> «Поиск вора» центрирует нового у
-        базы. Весь цикл в зум-ине (кнопка события видна, марши крошечные).
-
-        Склянки/энергия — пиггибеком на превью отправки (окно энергии только
-        оттуда: с карты «+» тапнет кнопку дома), поэтому refill/want_flasks
-        прокидываются в оба пути отправки."""
-        if self.flasks is not None and self.flasks < self.cfg.flask_stop_threshold:
-            self.log(f"Склянок {self.flasks} < {self.cfg.flask_stop_threshold} — стоп.")
-            return Action('stop')
-
-        img = self.driver.screenshot()
-        squad = self.vision.squad_state(img)
-        if not self._squad_ready(squad):
-            self.log(f"Отряд занят ({squad}), ждём.")
-            self.sleep(self.human.idle_s(2.0))
-            return None
-
-        energy = self.vision.read_energy(img)
-        refill = energy is not None and energy < self.cfg.energy_refill_threshold
-        want_flasks = self.flasks is None          # ещё не читали -> прочитать на превью
-        mobs = self._neighbor_mobs(img)
-        head = (f"[отряд={squad}] энергия={energy} склянок={self.flasks}"
-                + (" (+рефилл склянкой)" if refill else ""))
-
-        if self.cfg.dry_run:
-            self.log(head + (f" -> сосед-моб (видно {len(mobs)})" if mobs else " -> соседей нет, поиск вора"))
-            self.sleep(1.0)
-            return Action('attack_mob')
-
-        if mobs:
-            target = nearest(mobs, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
-            self.log(head + f" -> сосед-моб @({target.x},{target.y}) [видно {len(mobs)}]")
-            res = self.actions.attack_mob(target, refill=refill, want_flasks=want_flasks)
-            self.log(f"  Атака соседа -> {res}")
-            if res != 'dispatched':
-                self.skip_targets.add(self._target_key(target))   # фантом/промах -> не выбирать снова
-        else:
-            self.log(head + " -> соседей нет, поиск вора у базы")
-            res = self.actions.search_and_attack_mob(refill=refill, want_flasks=want_flasks)
-            self.log(f"  Поиск+атака -> {res}")
-
-        if self.actions.last_flasks is not None:
-            self.flasks = self.actions.last_flasks
-
-        if res == 'dispatched':
-            self._no_progress = 0
-        else:
-            self._no_progress += 1
-            if self._no_progress >= self.cfg.max_search_failures:
-                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
-                return Action('stop')
-        return Action('attack_mob')
 
     def _corruption_iteration(self):
         """Режим «Элитная скверна»: гейт по числу активных отрядов «Отряд N/4»,
@@ -512,8 +445,6 @@ class BotEngine:
             return self._corruption_iteration()
         if self.cfg.strategy == "thief":
             return self._thief_iteration()
-        if self.cfg.use_search_strategy:
-            return self._search_iteration()
 
         img = self.driver.screenshot()
 
