@@ -204,13 +204,7 @@ class ThiefActions:
         # подменяет эту строку на «Ваши высокоуровневые солдаты еще не
         # достигли предела», и гейт пропустил бы заведомо проходимого вора
         # (мощь 13M против 670K).
-        self._select_squad()
-        send = self.vision.find_button(self.driver.screenshot(), "dispatch") or send
-        if self.cancel.stopped():
-            return "stopped"
-        self.driver.tap(send)
-        self.human.after_tap(1.5)
-        return "dispatched"
+        return self._dispatch(send)
 
     def _low_energy(self, refill):
         """Энергии меньше стоимости: игра подменила «Отправиться» на
@@ -231,7 +225,21 @@ class ThiefActions:
             # use_flask() внутри тапал и спал — то же окно для Стопа, что и
             # выше: не спутать отмену с настоящим провалом возврата превью
             return "stopped" if self.cancel.stopped() else self._abort("после склянки превью не вернулось")
+        return self._dispatch(send)
+
+    def _dispatch(self, send):
+        """Хвост отправки: выбрать отряд -> перечитать «Отправиться» -> тап.
+
+        Общий для обычного пути и пути после склянки: раньше это были две
+        похожие копии, и они уже разошлись — копия после склянки не
+        перечитывала кнопку (вёрстка успевает перерисоваться дважды: окно
+        энергии и выбор отряда) и не проверяла Стоп перед этим самым тапом,
+        хотя пауза внутри use_flask() (несколько тапов, ~3 c) — самое
+        широкое окно для Стопа во всём методе, а тап тратит 10 энергии."""
         self._select_squad()
+        send = self.vision.find_button(self.driver.screenshot(), "dispatch") or send
+        if self.cancel.stopped():
+            return "stopped"
         self.driver.tap(send)
         self.human.after_tap(1.5)
         return "dispatched"

@@ -205,6 +205,9 @@ def test_attack_dispatches_thief():
     assert (411, 1184) in d.taps          # тап по цели
     assert (425, 1630) in d.taps          # слот отряда 2
     assert (536, 1358) in d.taps          # «Отправиться»
+    cfg = _cfg()
+    center = (cfg.screen_w // 2, cfg.screen_h // 2 + cfg.zoom_center_tap_offset_y)
+    assert center not in d.taps           # панель открылась сразу -> добивающего тапа не было
 
 def test_attack_retaps_center_when_first_tap_zoomed():
     """Промах по мелкой иконке зумит карту и центрирует цель -> второй тап."""
@@ -234,11 +237,183 @@ def test_attack_skips_plain_mob():
     assert (537, 1277) not in d.taps       # «Атака» НЕ нажата
 
 def test_attack_reports_low_energy_when_refill_not_allowed():
-    """Игра подменила «Отправиться» на «Увеличить энергию», склянки нельзя."""
+    """Игра подменила «Отправиться» на «Увеличить энергию», склянки нельзя.
+
+    use_flask подменён на счётчик вызовов, а не оставлен настоящим: раньше
+    тест ловил нарушение refill=False случайно — через AttributeError
+    внутри реального EnergyRefill (у FakeVision этого файла нет методов
+    окна энергии), а не через ассерт. Как только FakeVision дорастёт до
+    энергоокна (неизбежно на следующей задаче), эта случайная защита
+    исчезнет молча, и тест позеленеет даже при сломанном гейте refill."""
     v = FakeVision(buttons_by_frame={
         ("panel", "attack"): Box(537, 1277, 120, 120),
         ("low", "boost_energy"): Box(548, 1367, 300, 88),
     })
     t, d = _thief(["panel", "panel", "low", "low"], v)
+    flask_calls = []
+    t.energy.use_flask = lambda: flask_calls.append(1) or True
     assert t.attack(Target("mob", 5, 411, 1184), refill=False) == "low_energy"
     assert t.actions.closed == 1
+    assert flask_calls == []               # склянка не потрачена — use_flask не вызывали
+    assert (425, 1630) not in d.taps       # отряд не выбран
+    assert (536, 1358) not in d.taps       # «Отправиться» не нажата
+
+# --- attack()/_low_energy(): отмена проверяется ПЕРЕД каждым тапом -------
+# По образцу cancel-тестов для search() выше: у каждой точки проверки
+# cancel.stopped() в attack()/_low_energy()/_dispatch() должен быть тест,
+# который красный, если проверку убрать — иначе аудит на бумаге не значит
+# ничего (см. предупреждение задачи о том, что Стоп нельзя путать с провалом).
+
+def test_attack_makes_no_taps_when_already_stopped():
+    """Стоп нажат до захода — ни одного тапа."""
+    v = FakeVision()
+    cancel = Cancel()
+    cancel.set()
+    driver = FakeDriver(["panel"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    assert t.attack(Target("mob", 5, 411, 1184)) == "stopped"
+    assert driver.taps == []
+
+def test_attack_stops_before_second_tap_when_cancelled_after_miss():
+    """Первый тап промахнулся (панель не нашлась) -> перед добивающим тапом
+    по центру тоже проверяем Стоп, а не только перед первым тапом."""
+    v = FakeVision(buttons_by_frame={})
+    cancel = Cancel()
+    driver = FakeDriver(["zoomed"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    orig_tap = driver.tap
+    def tap_then_stop(target):
+        orig_tap(target)
+        cancel.set()                    # Стоп сразу после промахнувшегося тапа
+    driver.tap = tap_then_stop
+
+    assert t.attack(Target("mob", 5, 411, 1184)) == "stopped"
+    assert len(driver.taps) == 1        # добивающего тапа по центру не было
+
+def test_attack_stops_before_attack_tap_when_cancelled_after_panel_opens():
+    """Панель открылась с первого тапа и подтверждена как вор -> перед
+    тапом «Атака» тоже проверяем Стоп (та же цена ошибки — 10 энергии)."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+    })
+    cancel = Cancel()
+    driver = FakeDriver(["panel", "panel"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    orig_tap = driver.tap
+    def tap_then_stop(target):
+        orig_tap(target)
+        cancel.set()                    # Стоп сразу после тапа по цели
+    driver.tap = tap_then_stop
+
+    assert t.attack(Target("mob", 5, 411, 1184)) == "stopped"
+    assert driver.taps == [(411, 1184)]     # тапа по «Атака» не было
+
+def test_attack_stops_when_cancelled_after_attack_tap_and_preview_unclear():
+    """После тапа «Атака» превью не распозналось (ни «Отправиться», ни
+    «Увеличить энергию»). Если причина — Стоп в паузе после тапа, статус
+    обязан быть 'stopped', а не 'failed' (см. предупреждение задачи: этот
+    самый класс бага ревью уже находило в задаче 5)."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+    })
+    cancel = Cancel()
+    driver = FakeDriver(["panel", "panel", "murky"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    orig_tap = driver.tap
+    def hook(target):
+        orig_tap(target)
+        if len(driver.taps) == 2:       # ровно после тапа «Атака»
+            cancel.set()
+    driver.tap = hook
+
+    assert t.attack(Target("mob", 5, 411, 1184)) == "stopped"
+    assert driver.backs == 0            # BACK не звали — это не провал, это Стоп
+
+def test_attack_stops_before_final_tap_when_cancelled_after_squad_selected():
+    """После выбора отряда и до финального тапа «Отправиться» тоже
+    проверяем Стоп — этот тап тратит энергию, поэтому важнее остальных."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("preview", "dispatch"): Box(536, 1358, 410, 100),
+    })
+    cancel = Cancel()
+    driver = FakeDriver(["panel", "panel", "preview", "preview"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    orig_tap = driver.tap
+    def hook(target):
+        orig_tap(target)
+        if len(driver.taps) == 3:       # цель, «Атака», слот отряда
+            cancel.set()
+    driver.tap = hook
+
+    assert t.attack(Target("mob", 5, 411, 1184)) == "stopped"
+    assert (536, 1358) not in driver.taps    # «Отправиться» не нажата
+
+def test_low_energy_stops_when_cancelled_during_flask():
+    """energy.use_flask() сам проверяет Стоп и возвращает False -> статус
+    должен быть 'stopped', а не 'low_energy' (иначе лог соврёт про причину:
+    подмена написала бы «энергии не хватает», хотя человек нажал Стоп)."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("low", "boost_energy"): Box(548, 1367, 300, 88),
+    })
+    cancel = Cancel()
+    driver = FakeDriver(["panel", "panel", "low", "low"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    def fake_use_flask():
+        cancel.set()
+        return False
+    t.energy.use_flask = fake_use_flask
+
+    assert t.attack(Target("mob", 5, 411, 1184), refill=True) == "stopped"
+    assert t.actions.closed == 0        # прибираться не стали — это Стоп, не провал
+
+def test_low_energy_stops_when_preview_does_not_return_after_flask_and_cancelled():
+    """Склянка потрачена, но после неё превью не подтвердилось. Если причина
+    Стоп внутри use_flask (несколько тапов и ~3 с пауз — самое широкое окно
+    во всём методе), статус обязан отличаться от настоящего провала
+    возврата превью."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("low", "boost_energy"): Box(548, 1367, 300, 88),
+    })
+    cancel = Cancel()
+    driver = FakeDriver(["panel", "panel", "low", "low"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    def fake_use_flask():
+        cancel.set()      # склянка потрачена, а тут человек и нажал Стоп
+        return True
+    t.energy.use_flask = fake_use_flask
+
+    assert t.attack(Target("mob", 5, 411, 1184), refill=True) == "stopped"
+    assert driver.backs == 0
+
+def test_low_energy_stops_before_final_tap_when_cancelled_during_flask():
+    """Ключевой сценарий находки ревью: между тратой склянки и финальным
+    тапом «Отправиться» раньше не было ни одной проверки Стопа — самое
+    широкое окно во всём методе (use_flask сам тапает и спит ~3 c), а тап
+    тратит 10 энергии. _dispatch() теперь общий хвост для обоих путей и
+    проверяет Стоп перед этим тапом независимо от того, как до него дошли."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1277, 120, 120),
+        ("low", "boost_energy"): Box(548, 1367, 300, 88),
+        ("preview", "dispatch"): Box(536, 1358, 410, 100),
+    })
+    cancel = Cancel()
+    driver = FakeDriver(["panel", "panel", "low", "preview", "preview"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    def fake_use_flask():
+        cancel.set()       # Стоп нажат во время возни со склянкой
+        return True
+    t.energy.use_flask = fake_use_flask
+
+    assert t.attack(Target("mob", 5, 411, 1184), refill=True) == "stopped"
+    assert (536, 1358) not in driver.taps   # «Отправиться» не нажата
