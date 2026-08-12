@@ -227,6 +227,68 @@ class Vision:
         score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
         return score >= self.cfg.hud_energy_threshold
 
+    def map_zoom(self, img):
+        """Ступень зума карты: 'close' | 'skull' | 'far' | 'unknown'.
+
+        Лестница: close (спрайты, виден виджет «Отряд» и кнопки событий) ->
+        skull (черепа с бейджами, работает детекция целей) -> far (пин-зум,
+        целей нет). Один мягкий щипок = одна ступень, лестница обратима.
+
+        Легенда карты уровень НЕ определяет: замер зонда показал, что она
+        видна и на скулл-зуме, и на пин-зуме. Различает их бейдж: на пин-зуме
+        его нет ни у одной иконки, включая ложные оранжевые повозки.
+
+        База проверяется ОТДЕЛЬНО (тот же приём, что и в classify_screen):
+        легенды карты в базе нет, но якорь HUD энергии там тоже жив (замер
+        0.911), поэтому одного on_game_view мало — без этой проверки база
+        опозналась бы как 'close', и следующий шаг флоу тапнул бы в базе
+        (event_button там же ложно даёт 0.98-0.99)."""
+        if self.on_base_view(img):
+            return 'unknown'
+        if not self.on_world_map(img):
+            return 'close' if self.on_game_view(img) else 'unknown'
+        return 'skull' if any(t.level is not None for t in self.leveled_targets(img)) else 'far'
+
+    def thief_tab_open(self, img):
+        """Открыто ли окно «Событие» на вкладке «Поиск вора».
+
+        Якорь — надпись вкладки, а не её рамка: активная и неактивная
+        вкладки отличаются фоном (урок вкладки «Элитная скверна»). Набор
+        вкладок меняется вместе с активными событиями, поэтому ищем шаблон
+        в полосе вкладок, а не по фиксированной координате."""
+        return self._match_region(img, "thief_tab", self.cfg.thief_tab_region) >= self.cfg.thief_tab_threshold
+
+    def thief_panel(self, img):
+        """Панель именно Золотого вора, а не обычного моба ур.5.
+
+        Иконки на отзуме неразличимы, поэтому цель подтверждается тут. Тап
+        по цели энергии не стоит — платит только «Отправиться», значит
+        проверка бесплатна, а ошибка стоила бы 10 энергии и пустого захода."""
+        return self._match_full(img, "thief_title") >= self.cfg.thief_title_threshold
+
+    def wave_seconds(self, img):
+        """Сколько секунд до следующей волны воров, или None.
+
+        В кадре «Следующая волна золотого вора прибудет через 00:11:06!».
+        TemplateReader отбрасывает двоеточия, поэтому на выходе одно число
+        001106 — его надо разобрать как ЧЧММСС, иначе «11 минут» превратятся
+        в «1106 секунд» и бот проспит лишних семь минут."""
+        raw = self.reader.read(img, self.cfg.thief_wave_region)
+        if raw is None or not (0 <= raw <= 995959):
+            return None
+        h, m, s = raw // 10000, (raw // 100) % 100, raw % 100
+        if m > 59 or s > 59:
+            return None
+        return h * 3600 + m * 60 + s
+
+    def thief_screen(self, img):
+        """Экран режима вора: 'thief_tab' | 'thief_preview' | None."""
+        if self.thief_tab_open(img):
+            return 'thief_tab'
+        if self.find_button(img, "dispatch") is not None:
+            return 'thief_preview'
+        return None
+
     def classify_screen(self, img):
         """Что сейчас на экране — один ответ вместо россыпи предикатов.
 
@@ -248,6 +310,9 @@ class Vision:
             return 'join_list'
         if join is not None:
             return 'join_preview'
+        thief = self.thief_screen(img)          # ДО world_map: превью вора
+        if thief is not None:                   # не перекрывает легенду карты
+            return thief
         if self.on_world_map(img):
             return 'world_map'
         if self.on_base_view(img):

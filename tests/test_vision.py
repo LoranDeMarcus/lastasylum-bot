@@ -622,3 +622,49 @@ def test_find_targets_behaviour_unchanged():
     kinds = sorted(t.kind for t in v.find_targets(img))
     assert kinds.count("mob") == 6
     assert kinds.count("boss") == 2
+
+# --- Режим «Поиск вора»: ступени зума и экраны ---
+
+def test_map_zoom_recognises_three_steps():
+    """Легенды карты мало: она видна и на скулл-зуме, и на пин-зуме.
+    Различает их только бейдж."""
+    cfg, v = _thief_vision()
+    assert v.map_zoom(cv2.imread("reference/40_thief_map_skull.png")) == "skull"
+    assert v.map_zoom(cv2.imread("reference/41_thief_map_pin.png")) == "far"
+    assert v.map_zoom(cv2.imread("reference/42_thief_map_close.png")) == "close"
+
+def test_map_zoom_unknown_on_modal():
+    cfg, v = _thief_vision()
+    assert v.map_zoom(cv2.imread("reference/43_thief_tab.png")) == "unknown"
+    # База — не ступень зума карты: легенды карты там нет, но якорь HUD
+    # энергии жив (замер 0.911) и без явной проверки map_zoom принял бы её
+    # за 'close', а следующий шаг флоу тапнул бы в базе как по кнопке события
+    # (event_button там же ложно даёт 0.98-0.99).
+    assert v.map_zoom(cv2.imread("reference/29_base_view.png")) == "unknown"
+
+def test_thief_tab_open():
+    cfg, v = _thief_vision()
+    assert v.thief_tab_open(cv2.imread("reference/43_thief_tab.png"))
+    assert not v.thief_tab_open(cv2.imread("reference/12_event_dialog_WRONG.png"))
+    assert not v.thief_tab_open(cv2.imread("reference/13_corruption_dialog.png"))
+
+def test_thief_panel_on_both_thief_frames():
+    """Две панели вора из РАЗНЫХ сессий: порог не подогнан под один кадр."""
+    cfg, v = _thief_vision()
+    assert v.thief_panel(cv2.imread("reference/44_thief_panel.png"))
+    assert v.thief_panel(cv2.imread("reference/02_mob_panel_ataka.png"))
+    assert not v.thief_panel(cv2.imread("reference/09_boss_panel_shturm.png"))
+    assert not v.thief_panel(cv2.imread("reference/45_thief_preview.png"))
+
+def test_wave_seconds_reads_timer():
+    """«00:11:06» -> 666 секунд, а не 1106: цифры склеиваются без двоеточий,
+    поэтому разбираем их как ЧЧММСС, а не как одно число."""
+    cfg, v = _thief_vision()
+    assert v.wave_seconds(cv2.imread("reference/43_thief_tab.png")) == 666
+
+def test_classify_screen_knows_thief_screens():
+    """Без этих классов сторож в боевом режиме глушил бы бота на каждом
+    заходе «Поиска»: окно события и панель вора давали 'unknown'."""
+    cfg, v = _thief_vision()
+    assert v.classify_screen(cv2.imread("reference/43_thief_tab.png")) == "thief_tab"
+    assert v.classify_screen(cv2.imread("reference/45_thief_preview.png")) == "thief_preview"
