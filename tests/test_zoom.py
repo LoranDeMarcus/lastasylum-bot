@@ -1,4 +1,5 @@
 from config import Config
+from src.cancel import Cancel
 from src.zoom import ZoomKeeper
 
 class FakeDriver:
@@ -56,19 +57,43 @@ def test_two_steps_from_far_to_close():
     assert _keeper(d).ensure("close") is True
     assert d.pinches == ["in", "in"]
 
+def test_two_steps_from_close_to_far():
+    """Лестница обратима: два щипка НАРУЖУ, не только внутрь — симметрия
+    с test_two_steps_from_far_to_close (та проверяла только направление in)."""
+    d = FakeDriver("close")
+    assert _keeper(d).ensure("far") is True
+    assert d.pinches == ["out", "out"]
+
 def test_unknown_screen_fails_without_pinching():
     """Не на карте — щипать вслепую нельзя: под нами может быть меню."""
     d = FakeDriver("unknown")
     assert _keeper(d).ensure("skull") is False
     assert d.pinches == []
 
+def test_stop_before_pinch_blocks_action():
+    """Отмена проверяется ПЕРЕД щипком, а не только между паузами: между
+    двумя паузами бот успевает щипнуть, а после Стопа щипать уже незачем
+    (та же историческая проблема, что решает src/cancel.py)."""
+    d = FakeDriver("close")
+    cancel = Cancel()
+    cancel.set()          # Стоп нажат ДО первого вызова ensure
+    keeper = ZoomKeeper(d, FakeVision(), _cfg(), log=lambda m: None,
+                         sleep=lambda s: None, cancel=cancel)
+    assert keeper.ensure("skull") is False
+    assert d.pinches == []
+
 def test_gives_up_after_fail_limit():
-    """Щипок не двигает карту -> не долбимся вечно."""
+    """Щипок не двигает карту -> не долбимся вечно.
+
+    Лимит здесь НАМЕРЕННО отличается от дефолта cfg.zoom_fail_limit (3,
+    см. config.py): при совпадении тест не отличил бы модуль, читающий
+    предел из конфига, от кода с захардкоженной тройкой — обе версии
+    остались бы зелёными. Значение 2 ловит именно эту подмену."""
     class Stuck(FakeDriver):
         def zoom_out(self):
             self.pinches.append("out")      # уровень не меняется
     cfg = _cfg()
-    cfg.zoom_fail_limit = 3
+    cfg.zoom_fail_limit = 2
     d = Stuck("close")
     assert _keeper(d, cfg).ensure("skull") is False
-    assert len(d.pinches) == 3
+    assert len(d.pinches) == 2
