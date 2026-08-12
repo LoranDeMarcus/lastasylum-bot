@@ -319,8 +319,14 @@ class BotEngine:
             self.log(f"[целей={len(targets)}] энергия={energy} -> «Поиск»")
             return self._thief_search()
         if not targets:
+            # Бюджет «Поисков» исчерпан, а целей всё ещё нет. Раньше отсюда
+            # снова звали _thief_search() — то есть ещё один «Поиск» вместо
+            # обещанного логом «жду волну». Единственный штатный выход из
+            # цикла (игра ответит 'no_wave') живьём НИ РАЗУ не подтверждался
+            # ни на одном прогоне — полагаться на него как на единственный
+            # тормоз нельзя. Спим сами, не дожидаясь честности игры.
             self.log("Целей нет и «Поиск» их не даёт — жду волну.")
-            return self._thief_search()
+            return self._thief_wait_for_wave()
 
         # 4. Бьём ближайшего к центру: после «Поиска» камера стоит на воре.
         self._searches = 0
@@ -333,10 +339,24 @@ class BotEngine:
             self.sleep(1.0)
             return Action('attack_mob')
 
+        used_before = self.thief.flasks_used
         res = self.thief.attack(target, refill=refill)
         self.log(f"  Удар по вору -> {res}")
+        # Тот же приём, что в _corruption_iteration: «В наличии: N» точнее
+        # локального учёта, но если оно не прочлось — считаем потраченное
+        # локально и НЕ молчим об этом. Раньше эта ветка только читала
+        # last_flask_stock: если «В наличии» не прочлось, self.flasks
+        # оставался None, а refill = self.flasks is None разрешал бы
+        # рефилл навсегда — порог склянок молча переставал действовать.
+        spent = self.thief.flasks_used - used_before
         if self.thief.last_flask_stock is not None:
             self.flasks = self.thief.last_flask_stock
+        elif spent and self.flasks is not None:
+            self.flasks = max(0, self.flasks - spent)
+        elif spent:
+            self.log("  остаток склянок прочитать не удалось — порог не действует")
+        if spent:
+            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
         if res == 'stopped':
             self.log("  заход прерван по кнопке Стоп")
             return Action('stop')
@@ -420,20 +440,33 @@ class BotEngine:
             self.skip_targets.clear()
             return Action('attack_mob')
         if res in ('no_wave', 'no_event'):
-            wait = self.thief.last_wave_seconds
-            if wait is None or wait <= 0:
-                wait = self.cfg.thief_wave_poll_s
-            wait = min(wait, self.cfg.thief_wave_max_sleep_s)
-            self.log(f"Воров нет — сплю {int(wait)} с до следующей волны.")
-            self._searches = 0
-            self.skip_targets.clear()
-            self.sleep(self.human.idle_s(wait))
-            return None
+            return self._thief_wait_for_wave()
         self._no_progress += 1
         if self._no_progress >= self.cfg.max_search_failures:
             self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
             return Action('stop')
         return Action('attack_mob')
+
+    def _thief_wait_for_wave(self):
+        """Сон до следующей волны воров. Общая точка для ДВУХ входов:
+        «Поиск» ответил no_wave/no_event, и «бюджет Поисков исчерпан, а
+        целей всё ещё нет» в _thief_iteration — раньше вторая ветка вместо
+        сна снова звала _thief_search(), давая бесконечный цикл заходов в
+        меню (см. правку по итогу финального ревью). Копий быть не должно.
+
+        last_wave_seconds годится для обеих точек: ThiefActions.search()
+        читает таймер волны при КАЖДОМ заходе в окно, а сюда бот попадает
+        только после нескольких заходов подряд — таймер уже, скорее всего,
+        известен."""
+        wait = self.thief.last_wave_seconds
+        if wait is None or wait <= 0:
+            wait = self.cfg.thief_wave_poll_s
+        wait = min(wait, self.cfg.thief_wave_max_sleep_s)
+        self.log(f"Воров нет — сплю {int(wait)} с до следующей волны.")
+        self._searches = 0
+        self.skip_targets.clear()
+        self.sleep(self.human.idle_s(wait))
+        return None
 
     def one_iteration(self):
         # Стоп мог прийти, пока движок спал между итерациями

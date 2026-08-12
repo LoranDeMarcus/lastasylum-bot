@@ -417,3 +417,19 @@ def test_low_energy_stops_before_final_tap_when_cancelled_during_flask():
 
     assert t.attack(Target("mob", 5, 411, 1184), refill=True) == "stopped"
     assert (536, 1358) not in driver.taps   # «Отправиться» не нажата
+
+def test_dispatch_checks_stop_before_squad_tap():
+    """Minor (финальное ревью): _dispatch тапал по слоту отряда
+    (_select_squad) раньше проверки Стопа. Место неудачное вдвойне —
+    _dispatch вызывается и после возни со склянкой (use_flask: несколько
+    тапов и ~3 c пауз), а это самое широкое окно для нажатия Стопа во
+    всём флоу. Правило проекта — проверка ПЕРЕД каждым тапом."""
+    v = FakeVision(buttons_by_frame={("preview", "dispatch"): Box(536, 1358, 410, 100)})
+    cancel = Cancel()
+    cancel.set()
+    driver = FakeDriver(["preview"])
+    t = ThiefActions(driver, v, FakeActions(), _cfg(), FakeZoom(),
+                     log=lambda m: None, sleep=lambda s: None, cancel=cancel)
+    send = Box(536, 1358, 410, 100)
+    assert t._dispatch(send) == "stopped"
+    assert driver.taps == []                # ни тапа по слоту отряда, ни «Отправиться»

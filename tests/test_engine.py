@@ -571,18 +571,25 @@ class ThiefFakeActions:
 
 class FakeThief:
     def __init__(self, search_result="searched", attack_result="dispatched",
-                 wave_seconds=None):
+                 wave_seconds=None, spend=0, stock=None):
         self.search_result = search_result
         self.attack_result = attack_result
         self.last_wave_seconds = wave_seconds
         self.flasks_used = 0
         self.last_flask_stock = None
+        self._spend = spend          # сколько склянок «тратит» удар (см. FakeCorruption)
+        self._stock = stock          # что «прочитано» в «В наличии: N»; None -> нечитаемо
         self.calls = []
     def search(self):
         self.calls.append("search")
         return self.search_result
     def attack(self, target, refill=False):
         self.calls.append(("attack", target.x, target.y, refill))
+        if refill:
+            self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+                self._stock -= self._spend
         return self.attack_result
 
 class FakeZoom:
@@ -678,6 +685,26 @@ def test_thief_sleeps_until_next_wave():
     eng = _thief_engine(v, thief=t, sleeps=sleeps)
     assert eng.one_iteration() is None
     assert max(sleeps) >= 600
+
+def test_thief_sleeps_when_search_budget_spent_and_still_no_targets():
+    """Critical (финальное ревью): бюджет «Поисков» исчерпан, целей всё ещё
+    нет, а «Поиск» продолжает отвечать 'searched' — живьём 'no_wave' от
+    игры ни разу не приходил, и полагаться на него как на единственный
+    выход из цикла нельзя. Бот обязан заснуть сам, а не долбить «Поиск»
+    вхолостую бесконечно (каждый заход — «Особое событие» + вкладка + два
+    щипка, риск бана за одинаковый макро-цикл)."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="searched", wave_seconds=None)
+    sleeps = []
+    eng = _thief_engine(v, thief=t, sleeps=sleeps,
+                        cfg=_thief_cfg(thief_min_targets=3, thief_searches_per_wave=2))
+    for _ in range(2):
+        eng.one_iteration()                  # исчерпываем бюджет «Поисков»
+    assert t.calls.count("search") == 2
+    action = eng.one_iteration()             # бюджет исчерпан, целей всё ещё нет
+    assert action is None                    # не 'attack_mob' — итерация просто ждёт
+    assert t.calls.count("search") == 2      # «Поиск» НЕ вызывали заново
+    assert sleeps                            # бот заснул до следующей волны
 
 # --- Регрессия: Стоп не должен считаться провалом (класс бага, который
 # ревью в этом плане уже ловило дважды в src/thief.py — коммиты 33cb819 и
@@ -808,3 +835,39 @@ def test_thief_skip_targets_reset_when_wave_ends():
     eng.skip_targets.add(("mob", 3, 4))
     eng.one_iteration()
     assert eng.skip_targets == set()
+
+# --- Important (финальное ревью): порог склянок молча переставал действовать,
+# если «В наличии: N» после удара не прочлось — ThiefActions.flasks_used было
+# объявлено и не читалось никем. Тот же приём, что уже есть у скверны
+# (test_unreadable_stock_is_logged_not_silently_ignored). ---
+
+def test_thief_unreadable_stock_is_logged_not_silently_ignored():
+    """Склянки потрачены (flasks_used вырос), но «В наличии: N» не
+    прочиталось (last_flask_stock остался None) -> порог перестаёт
+    действовать, и молчать об этом нельзя: refill = self.flasks is None
+    иначе разрешил бы рефилл навсегда."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(spend=2, stock=None)
+    eng = _thief_engine(v, thief=t)
+    eng.flasks = None            # остаток пока неизвестен (как после старта)
+    lines = []
+    eng.log = lines.append
+    eng.one_iteration()
+    assert any("прочитать не удалось" in s for s in lines)
+
+def test_thief_subtracts_spent_when_stock_unreadable_but_known():
+    """Остаток был известен (500), стока «В наличии» не прочлось -> считаем
+    локально (500 - потрачено), а не остаёмся слепы к порогу."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(spend=2, stock=None)
+    eng = _thief_engine(v, thief=t)          # eng.flasks == 500 (см. _thief_engine)
+    eng.one_iteration()
+    assert eng.flasks == 498
+
+def test_thief_prefers_read_stock_over_local_count():
+    """Прочитанное «В наличии: N» точнее локального счёта — как у скверны."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(spend=2, stock=273)
+    eng = _thief_engine(v, thief=t)          # локальный учёт (500) был бы неверен
+    eng.one_iteration()
+    assert eng.flasks == 273
