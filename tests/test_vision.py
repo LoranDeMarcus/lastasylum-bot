@@ -641,6 +641,13 @@ def test_map_zoom_unknown_on_modal():
     # за 'close', а следующий шаг флоу тапнул бы в базе как по кнопке события
     # (event_button там же ложно даёт 0.98-0.99).
     assert v.map_zoom(cv2.imread("reference/29_base_view.png")) == "unknown"
+    # Превью отправки — модалка режима, тоже не ступень зума: она не
+    # перекрывает легенду и бейджи целиком (замер: 3 из 4 бейджей вокруг
+    # неё на этом кадре остаются читаемыми), и без проверки thief_screen
+    # map_zoom вернул бы 'skull' чисто по везению раскладки этого кадра —
+    # в другой раскладке та же модалка могла бы закрыть все бейджи и
+    # соврать 'far'.
+    assert v.map_zoom(cv2.imread("reference/45_thief_preview.png")) == "unknown"
 
 def test_thief_tab_open():
     cfg, v = _thief_vision()
@@ -661,6 +668,38 @@ def test_wave_seconds_reads_timer():
     поэтому разбираем их как ЧЧММСС, а не как одно число."""
     cfg, v = _thief_vision()
     assert v.wave_seconds(cv2.imread("reference/43_thief_tab.png")) == 666
+
+def test_wave_seconds_parses_valid_raw_without_leading_hour_zeros():
+    """Синтетика в обход TemplateReader/картинки: FixedReader(1106) — то же
+    «00:11:06», что и на живом кадре, но напрямую доказывает разбор ЧЧММСС,
+    не завися от региона/детекции цифр. Без позитивного случая рядом с
+    негативными тест мусора мог бы выродиться в «всегда None»."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(1106))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)   # FixedReader его не читает
+    assert v.wave_seconds(blank) == 666
+
+def test_wave_seconds_none_when_raw_exceeds_ceiling():
+    """Потолок 995959 («99:59:59») — защита от мусора: значение крупнее
+    этого не может быть валидным таймером ни при каком разборе ЧЧММСС."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(999999))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)
+    assert v.wave_seconds(blank) is None
+
+def test_wave_seconds_none_when_minutes_invalid():
+    """raw=6106 -> ЧЧ=00, ММ=61, СС=06 — минут «61» не бывает, мусор."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(6106))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)
+    assert v.wave_seconds(blank) is None
+
+def test_wave_seconds_none_when_seconds_invalid():
+    """raw=1161 -> ЧЧ=00, ММ=11, СС=61 — секунд «61» не бывает, мусор."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(1161))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)
+    assert v.wave_seconds(blank) is None
 
 def test_classify_screen_knows_thief_screens():
     """Без этих классов сторож в боевом режиме глушил бы бота на каждом
