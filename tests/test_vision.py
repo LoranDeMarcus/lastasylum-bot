@@ -585,9 +585,9 @@ def _thief_vision():
 def test_leveled_targets_reads_five_under_skulls():
     """Кадр отзума с ворами: почти у всех целей бейдж читается как 5.
 
-    Не «у всех»: замер зонда дал 12 верных из 13 (один бейдж прочёлся как
-    «51», ещё один за нижним краем кадра). Нечитаемый бейдж безопасен —
-    цель просто пропускается, ложного тапа не будет."""
+    Не «у всех»: 13 целей, 11 читаются ровно как 5, одна как «51» (склейка
+    соседних цифр), у одной бейдж за нижним краем кадра. Нечитаемый бейдж
+    безопасен — цель просто пропускается, ложного тапа не будет."""
     cfg, v = _thief_vision()
     img = cv2.imread("reference/40_thief_map_skull.png")
     fives = [t for t in v.leveled_targets(img) if t.level == 5]
@@ -596,10 +596,16 @@ def test_leveled_targets_reads_five_under_skulls():
 def test_leveled_targets_finds_nothing_readable_on_pin_zoom():
     """Пин-зум: жёлтые блобы есть (повозки), бейджа нет ни у одного.
 
-    Это и делает бейдж доказательством зума, а не только фильтром цели."""
+    Это и делает бейдж доказательством зума, а не только фильтром цели.
+    Список целей проверяем непустым отдельно: all() на пустой
+    последовательности истинно, и без этой проверки тест продолжил бы
+    зеленеть, даже если детекция блобов сломается и вернёт ноль целей —
+    перестав доказывать то, ради чего написан."""
     cfg, v = _thief_vision()
     img = cv2.imread("reference/41_thief_map_pin.png")
-    assert all(t.level is None for t in v.leveled_targets(img))
+    targets = v.leveled_targets(img)
+    assert len(targets) > 0
+    assert all(t.level is None for t in targets)
 
 def test_leveled_targets_reads_boss_levels_too():
     """Уровень берётся из бейджа, а не из kind: у рогатых он свой."""
