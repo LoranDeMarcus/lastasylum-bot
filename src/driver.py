@@ -152,22 +152,18 @@ class AdbDriver:
         self._adb("shell", "input", "swipe",
                   str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(dur_ms))
 
-    def zoom_out(self):
-        """Отзум щипком (multitouch). Устройство BlueStacks — MT protocol
-        type A (ABS_MT_POSITION_X/Y 0..32767, пальцы через SYN_MT_REPORT).
-        Два пальца сходятся к центру = уменьшение. Команды подаём в `adb
-        shell` через stdin (длинная цепочка не влезает в аргумент adb)."""
+    def _pinch(self, a0, a1, b0, b1, steps=16):
+        """Щипок двумя пальцами: палец A ведём a0->a1, палец B — b0->b1.
+
+        Устройство BlueStacks — MT protocol type A (ABS_MT_POSITION_X/Y
+        0..32767, пальцы разделяются SYN_MT_REPORT). Команды подаём в `adb
+        shell` через stdin: длинная цепочка не влезает в аргумент adb."""
         dev = "/dev/input/event4"
         def ev(px, py):
             return round(px * 32767 / self.cfg.screen_w), round(py * 32767 / self.cfg.screen_h)
         lines = []
         def se(t, c, v):
             lines.append(f"sendevent {dev} {t} {c} {v}")
-        # GENTLE (один «щелчок» зума): сильный щипок переотзумивает до
-        # «пин-зума» (мобы = белые пины). Мягкое сведение sprite -> череп.
-        a0, a1 = (540, 600), (540, 830)      # верхний палец вниз (мягко)
-        b0, b1 = (540, 1320), (540, 1090)    # нижний палец вверх (мягко)
-        steps = 16
         for i in range(steps + 1):
             f = i / steps
             for (p0, p1) in ((a0, a1), (b0, b1)):
@@ -179,3 +175,20 @@ class AdbDriver:
         self._ensure_server()          # команда идёт мимо _adb — демона поднимаем сами
         subprocess.run([self.cfg.adb_path, "-s", self.cfg.adb_serial, "shell"],
                        input=script.encode(), check=True)
+
+    # GENTLE (один «щелчок» зума): сильный щипок переотзумивает до «пин-зума»
+    # (мобы = белые пины). Мягкое сведение даёт переход sprite -> череп.
+    _PINCH_NEAR = ((540, 830), (540, 1090))    # пальцы сведены (ближе к центру)
+    _PINCH_FAR = ((540, 600), (540, 1320))     # пальцы разведены
+
+    def zoom_out(self):
+        """Отзум: два пальца сходятся к центру."""
+        (an, bn), (af, bf) = self._PINCH_NEAR, self._PINCH_FAR
+        self._pinch(af, an, bf, bn)
+
+    def zoom_in(self):
+        """Зум-ин: два пальца расходятся от центра. Зеркало zoom_out —
+        нужен, чтобы откатить перелёт отзума и чтобы дотянуться до кнопок
+        событий: они видны только на зум-ине."""
+        (an, bn), (af, bf) = self._PINCH_NEAR, self._PINCH_FAR
+        self._pinch(an, af, bn, bf)

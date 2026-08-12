@@ -26,7 +26,7 @@ def test_gui_title_contains_version():
 def test_engine_start_logs_version():
     """Версия должна попадать в стартовый лог — его присылают человеку."""
     lines = []
-    cfg = Config(use_search_strategy=False, strategy="map", dry_run=True)
+    cfg = Config(strategy="map", dry_run=True)
     eng = BotEngine(driver=None, vision=None, actions=None, cfg=cfg,
                     log=lines.append, sleep=lambda s: None)
     eng.start()

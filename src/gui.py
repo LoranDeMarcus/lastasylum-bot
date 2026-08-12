@@ -49,7 +49,7 @@ def apply_flask_threshold(cfg, raw):
 def apply_strategy(cfg, value):
     """Режим бота из GUI. Неизвестное значение игнорируем: лучше остаться в
     прежнем режиме, чем уронить движок неизвестной веткой."""
-    if value in ("corruption", "join"):
+    if value in ("corruption", "join", "thief"):
         cfg.strategy = value
     return cfg.strategy
 
@@ -113,13 +113,16 @@ def run_gui(controller, log_queue=None, cfg=None):
             # итерацию, значит режим можно менять, не останавливая бота
             apply_strategy(cfg, mode_var.get())
             if log_queue is not None:
-                names = {"corruption": "свой штурм", "join": "присоединяться к чужим"}
+                names = {"corruption": "свой штурм", "join": "присоединяться к чужим",
+                         "thief": "поиск вора"}
                 log_queue.put(f"Режим: {names.get(cfg.strategy, cfg.strategy)}")
 
         tk.Label(mode_row, text="Режим:").pack(side="left", padx=(0, 4))
         tk.Radiobutton(mode_row, text="Свой штурм", value="corruption",
                        variable=mode_var, command=apply_mode).pack(side="left")
         tk.Radiobutton(mode_row, text="Присоединяться", value="join",
+                       variable=mode_var, command=apply_mode).pack(side="left")
+        tk.Radiobutton(mode_row, text="Поиск вора", value="thief",
                        variable=mode_var, command=apply_mode).pack(side="left")
 
     def request_stop():

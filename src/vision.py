@@ -24,21 +24,22 @@ class Vision:
                 return True
         return False
 
-    def find_targets(self, img):
-        """Мобы (плоские жёлтые черепа) и боссы (рогатые, того же тона).
-        Один жёлто-оранжевый тон ловит и тех и других; разделяем по aspect
+    def _target_blobs(self, img):
+        """(kind, cx, cy, w, h) для каждого жёлтого блоба-цели.
+
+        Общая часть find_targets и leveled_targets: одна маска, один фильтр
+        площади, одни HUD-зоны. Двух копий быть не должно — разъедутся.
+        Один жёлто-оранжевый тон ловит и мобов, и боссов; разделяем по aspect
         (ш/в): рога делают босса шире-чем-выше (aspect>=boss_aspect_min),
         плоский череп ~квадратный/выше (aspect<...). aspect зум-инвариантен.
-        Красные черепа (H≈8) в маску не попадают. HUD-зоны игнорируются.
-        Боссы бывают РАЗНОГО уровня — level тут номинальный, реальный тип
-        подтверждается панелью («Атака»/«Штурм») после тапа."""
+        Красные черепа (H≈8) в маску не попадают. HUD-зоны игнорируются."""
         H, W = img.shape[:2]
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array(self.cfg.mob_hsv_low, np.uint8),
                            np.array(self.cfg.mob_hsv_high, np.uint8))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        targets = []
+        out = []
         for c in contours:
             area = cv2.contourArea(c)
             if not (self.cfg.blob_min_area <= area <= self.cfg.blob_max_area):
@@ -50,11 +51,91 @@ class Vision:
             cx, cy = x + w // 2, y + h // 2
             if self._in_hud(cx, cy, W, H):
                 continue
-            if aspect >= self.cfg.boss_aspect_min:
-                targets.append(Target('boss', 0, cx, cy))   # рогатый = босс (ур. неизвестен)
-            else:
-                targets.append(Target('mob', 5, cx, cy))
-        return targets
+            out.append(('boss' if aspect >= self.cfg.boss_aspect_min else 'mob',
+                        cx, cy, w, h))
+        return out
+
+    def find_targets(self, img):
+        """Мобы (плоские жёлтые черепа) и боссы (рогатые, того же тона).
+        Боссы бывают РАЗНОГО уровня — level тут НОМИНАЛЬНЫЙ (0 для босса,
+        5 для моба), реальный уровень читается в leveled_targets из бейджа,
+        а тип босса подтверждается панелью («Атака»/«Штурм») после тапа."""
+        return [Target(kind, 0 if kind == 'boss' else 5, cx, cy)
+                for kind, cx, cy, _w, _h in self._target_blobs(img)]
+
+    def target_level(self, img, cx, cy, h):
+        """Уровень цели из серой пилюли ПОД иконкой, или None.
+
+        Ищем пилюлю в полосе, а не по фиксированному смещению: у рогатых
+        спрайт выше и бейдж уезжает вниз (замер: моб dy≈+52, рогатый dy≈+80).
+        Тот же приём, что спас строку склянки — искать по признаку, а не по
+        координате."""
+        bw, bh = self.cfg.target_badge_band
+        y0, x0 = cy + h // 2, max(0, cx - bw // 2)
+        band = img[y0:y0 + bh, x0:x0 + bw]
+        if band.size == 0:
+            return None
+        hsv = cv2.cvtColor(band, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array(self.cfg.target_badge_hsv_low, np.uint8),
+                           np.array(self.cfg.target_badge_hsv_high, np.uint8))
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        minw, minh = self.cfg.target_badge_min_size
+        maxw, maxh = self.cfg.target_badge_max_size
+        best = None
+        for c in cnts:
+            x, y, w, ph = cv2.boundingRect(c)
+            if not (minw <= w <= maxw and minh <= ph <= maxh):
+                continue
+            if best is None or w * ph > best[2] * best[3]:
+                best = (x, y, w, ph)
+        if best is None:
+            return None
+        x, y, w, ph = best
+        return self.reader.read(img, (x0 + x, y0 + y, w, ph))
+
+    def leveled_targets(self, img):
+        """Цели с уровнем, прочитанным из бейджа.
+
+        Уровень из бейджа, а не из kind: kind считается по пропорциям и у
+        края экрана врёт (замер: череп ур.5 у баннера дал 'boss', а бейдж
+        всё равно прочёлся как «5»). Бейдж заодно отсекает мусор — у
+        оранжевых повозок его нет."""
+        return [Target(kind, self.target_level(img, cx, cy, h), cx, cy)
+                for kind, cx, cy, _w, h in self._target_blobs(img)]
+
+    def _readable_badge_count(self, img):
+        """Сколько бейджей уровня читаются ГДЕ УГОДНО на карте — не только
+        под обнаруженными целями. В этой игре серая пилюля с числом висит
+        под ЛЮБЫМ объектом карты (кристаллами, деревьями, ресурсными
+        точками), а не только под золотыми ворами. Именно это и отличает
+        скулл-зум от пин-зума НАДЁЖНО: проверка «есть ли бейдж у уже
+        найденной ЦЕЛИ» на пустом участке карты (целей в кадре нет — штатный
+        конец волны, ради которого и существует «Поиск») всегда соврала бы
+        'far', даже стоя на правильном скулл-зуме.
+
+        Геометрия и цвет пилюли те же, что у target_level (см.
+        cfg.target_badge_*) — просто ищем по всей карте (без HUD-зон), а не
+        в узкой полосе под конкретной иконкой. «Читается» — контур матчит
+        размер пилюли И OCR реально распознал число: одной формы мало (на
+        пин-зуме форма-кандидат попадается, но не читается ни разу)."""
+        H, W = img.shape[:2]
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, np.array(self.cfg.target_badge_hsv_low, np.uint8),
+                           np.array(self.cfg.target_badge_hsv_high, np.uint8))
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        minw, minh = self.cfg.target_badge_min_size
+        maxw, maxh = self.cfg.target_badge_max_size
+        count = 0
+        for c in cnts:
+            x, y, w, h = cv2.boundingRect(c)
+            if not (minw <= w <= maxw and minh <= h <= maxh):
+                continue
+            cx, cy = x + w // 2, y + h // 2
+            if self._in_hud(cx, cy, W, H):
+                continue
+            if self.reader.read(img, (x, y, w, h)) is not None:
+                count += 1
+        return count
 
     def panel_action(self, img):
         """Что за панель открылась после тапа по цели (verify попадания):
@@ -180,6 +261,88 @@ class Vision:
         score = float(cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED).max())
         return score >= self.cfg.hud_energy_threshold
 
+    def map_zoom(self, img):
+        """Ступень зума карты: 'close' | 'skull' | 'far' | 'unknown'.
+
+        Лестница: close (спрайты, виден виджет «Отряд» и кнопки событий) ->
+        skull (черепа с бейджами, работает детекция целей) -> far (пин-зум,
+        целей нет). Один мягкий щипок = одна ступень, лестница обратима.
+
+        Легенда карты уровень НЕ определяет: замер зонда показал, что она
+        видна и на скулл-зуме, и на пин-зуме. Различает их ЧИСЛО читаемых
+        бейджей на всей карте (_readable_badge_count), а НЕ бейдж под уже
+        найденной целью: бейдж в этой игре висит под ЛЮБЫМ объектом карты
+        (кристаллы, деревья, ресурсные точки), а не только под ворами, и
+        конец волны (целей в кадре нет — штатное состояние) на скулл-зуме
+        не должен читаться как пин-зум только потому, что рядом нет цели.
+
+        База проверяется ОТДЕЛЬНО (тот же приём, что и в classify_screen):
+        легенды карты в базе нет, но якорь HUD энергии там тоже жив (замер
+        0.911), поэтому одного on_game_view мало — без этой проверки база
+        опозналась бы как 'close', и следующий шаг флоу тапнул бы в базе
+        (event_button там же ложно даёт 0.98-0.99).
+
+        Модалки режима («Событие»/превью отправки) — тоже не ступень зума.
+        Они не всегда перекрывают легенду и бейджи целиком: замер на
+        45_thief_preview.png показал, что превью оставляет читаемыми бейджи
+        3 из 4 целей по краям, и без этой проверки map_zoom вернул бы
+        'skull' — ЧИСТО ПО ВЕЗЕНИЮ раскладки конкретного кадра (в другой
+        раскладке превью могло бы закрыть все бейджи и соврать 'far'). Ответ
+        не должен зависеть от того, что случайно осталось видно из-под
+        модалки, поэтому thief_screen проверяется до world_map, как и в
+        classify_screen."""
+        if self.on_base_view(img):
+            return 'unknown'
+        if self.thief_screen(img) is not None:
+            return 'unknown'
+        if not self.on_world_map(img):
+            return 'close' if self.on_game_view(img) else 'unknown'
+        return ('skull' if self._readable_badge_count(img) >= self.cfg.map_zoom_badge_threshold
+                else 'far')
+
+    def thief_tab_open(self, img):
+        """Открыто ли окно «Событие» на вкладке «Поиск вора».
+
+        Якорь — надпись вкладки, а не её рамка: активная и неактивная
+        вкладки отличаются фоном (урок вкладки «Элитная скверна»). Набор
+        вкладок меняется вместе с активными событиями, поэтому ищем шаблон
+        в полосе вкладок, а не по фиксированной координате."""
+        return self._match_region(img, "thief_tab", self.cfg.thief_tab_region) >= self.cfg.thief_tab_threshold
+
+    def thief_panel(self, img):
+        """Панель именно Золотого вора, а не обычного моба ур.5.
+
+        Иконки на отзуме неразличимы, поэтому цель подтверждается тут. Тап
+        по цели энергии не стоит — платит только «Отправиться», значит
+        проверка бесплатна, а ошибка стоила бы 10 энергии и пустого захода."""
+        return self._match_full(img, "thief_title") >= self.cfg.thief_title_threshold
+
+    def wave_seconds(self, img):
+        """Сколько секунд до следующей волны воров, или None.
+
+        В кадре «Следующая волна золотого вора прибудет через 00:11:06!».
+        TemplateReader отбрасывает двоеточия, поэтому на выходе одно число
+        001106 — его надо разобрать как ЧЧММСС, иначе «11 минут» превратятся
+        в «1106 секунд» и бот проспит лишних семь минут."""
+        raw = self.reader.read(img, self.cfg.thief_wave_region)
+        # Нижней границы нет намеренно: TemplateReader склеивает цифры
+        # '0'-'9' в int, отрицательным raw быть не может — проверка на это
+        # была бы мёртвой веткой, подразумевающей несуществующий сценарий.
+        if raw is None or raw > 995959:
+            return None
+        h, m, s = raw // 10000, (raw // 100) % 100, raw % 100
+        if m > 59 or s > 59:
+            return None
+        return h * 3600 + m * 60 + s
+
+    def thief_screen(self, img):
+        """Экран режима вора: 'thief_tab' | 'thief_preview' | None."""
+        if self.thief_tab_open(img):
+            return 'thief_tab'
+        if self.find_button(img, "dispatch") is not None:
+            return 'thief_preview'
+        return None
+
     def classify_screen(self, img):
         """Что сейчас на экране — один ответ вместо россыпи предикатов.
 
@@ -201,6 +364,9 @@ class Vision:
             return 'join_list'
         if join is not None:
             return 'join_preview'
+        thief = self.thief_screen(img)          # ДО world_map: превью вора
+        if thief is not None:                   # не перекрывает легенду карты
+            return thief
         if self.on_world_map(img):
             return 'world_map'
         if self.on_base_view(img):

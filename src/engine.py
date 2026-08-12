@@ -17,7 +17,8 @@ class BotEngine:
     для проверки детекции/логики на живой игре без действий."""
 
     def __init__(self, driver, vision, actions, cfg, log=print, sleep=time.sleep,
-                 corruption=None, join=None, human=None, cancel=None, watchdog=None):
+                 corruption=None, join=None, thief=None, zoom=None,
+                 human=None, cancel=None, watchdog=None):
         self.driver = driver
         self.vision = vision
         self.actions = actions
@@ -32,11 +33,15 @@ class BotEngine:
         self.cancel = cancel if cancel is not None else Cancel()
         self.corruption = corruption   # CorruptionActions для режима «Элитная скверна»
         self.join = join               # JoinActions для режима «Присоединиться к штурму»
+        self.thief = thief             # ThiefActions для режима «Поиск вора»
+        self.zoom = zoom               # ZoomKeeper: тот же режим, вид карты
         self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
-        self._no_progress = 0       # подряд итераций без отправки (сосед-промах / провал «Поиска»)
+        self._no_progress = 0       # подряд итераций без отправки (в любом активном режиме)
+        self._zoom_fails = 0        # подряд неудачных приведений зума
+        self._searches = 0          # «Поисков» подряд без набора целей
         # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
         # а не раннер: подтверждение видно только здесь, а «dispatched» от
         # JoinActions — всего лишь «тап прошёл», и живьём уже оказывался ложным.
@@ -58,16 +63,18 @@ class BotEngine:
                      "из игры после первого рефилла.")
         elif self.cfg.strategy == "join":
             # flasks остаётся None намеренно: ветка нужна лишь затем, чтобы
-            # режим не проваливался в use_search_strategy. Ни энергия, ни
-            # склянки в этом режиме не тратятся, читать их неоткуда и незачем.
+            # режим не провалился в ветку по умолчанию (map), которая читает
+            # flasks_left() через OCR карты. Ни энергия, ни склянки в этом
+            # режиме не тратятся, читать их неоткуда и незачем.
             self.flasks = None
             self.log("Старт (присоединение к чужим штурмам). Энергия и склянки "
                      "в этом режиме не тратятся.")
-        elif self.cfg.use_search_strategy:
-            # окно энергии открывается только с превью отправки; с карты «+»
-            # тапнет кнопку дома -> склянки прочитаем на первом же превью
+        elif self.cfg.strategy == "thief":
+            # Как и в скверне, остаток склянок читается только ПОСЛЕ первого
+            # применения — до этого его перекрывает счётчик количества.
             self.flasks = None
-            self.log("Старт («Поиск вора»). Склянки прочитаем на первом превью.")
+            self.log("Старт («Поиск вора»). Остаток склянок прочитаю "
+                     "из игры после первого рефилла.")
         else:
             self.flasks = self.actions.flasks_left()
             self.log(f"Старт. Склянок: {self.flasks}")
@@ -93,69 +100,6 @@ class BotEngine:
     @staticmethod
     def _target_key(t):
         return (t.kind, round(t.x / 20), round(t.y / 20))
-
-    def _neighbor_mobs(self, img):
-        """Мобы, видимые на текущем виде у базы (после «Поиска» камера там).
-        Только kind=='mob' (рогатых боссов и ложные UI-иконки, что классятся
-        как 'boss', не фармим), без помеченных skip_targets (фантомы/промахи)."""
-        return [t for t in self.vision.find_targets(img)
-                if t.kind == 'mob' and self._target_key(t) not in self.skip_targets]
-
-    def _search_iteration(self):
-        """Гибрид «Поиск вора» + фарм соседей: ждём свободный отряд по виджету
-        -> если на текущем виде виден моб-сосед, шлём отряд 2 на ближайшего к
-        центру (короткий марш); соседей нет -> «Поиск вора» центрирует нового у
-        базы. Весь цикл в зум-ине (кнопка события видна, марши крошечные).
-
-        Склянки/энергия — пиггибеком на превью отправки (окно энергии только
-        оттуда: с карты «+» тапнет кнопку дома), поэтому refill/want_flasks
-        прокидываются в оба пути отправки."""
-        if self.flasks is not None and self.flasks < self.cfg.flask_stop_threshold:
-            self.log(f"Склянок {self.flasks} < {self.cfg.flask_stop_threshold} — стоп.")
-            return Action('stop')
-
-        img = self.driver.screenshot()
-        squad = self.vision.squad_state(img)
-        if not self._squad_ready(squad):
-            self.log(f"Отряд занят ({squad}), ждём.")
-            self.sleep(self.human.idle_s(2.0))
-            return None
-
-        energy = self.vision.read_energy(img)
-        refill = energy is not None and energy < self.cfg.energy_refill_threshold
-        want_flasks = self.flasks is None          # ещё не читали -> прочитать на превью
-        mobs = self._neighbor_mobs(img)
-        head = (f"[отряд={squad}] энергия={energy} склянок={self.flasks}"
-                + (" (+рефилл склянкой)" if refill else ""))
-
-        if self.cfg.dry_run:
-            self.log(head + (f" -> сосед-моб (видно {len(mobs)})" if mobs else " -> соседей нет, поиск вора"))
-            self.sleep(1.0)
-            return Action('attack_mob')
-
-        if mobs:
-            target = nearest(mobs, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
-            self.log(head + f" -> сосед-моб @({target.x},{target.y}) [видно {len(mobs)}]")
-            res = self.actions.attack_mob(target, refill=refill, want_flasks=want_flasks)
-            self.log(f"  Атака соседа -> {res}")
-            if res != 'dispatched':
-                self.skip_targets.add(self._target_key(target))   # фантом/промах -> не выбирать снова
-        else:
-            self.log(head + " -> соседей нет, поиск вора у базы")
-            res = self.actions.search_and_attack_mob(refill=refill, want_flasks=want_flasks)
-            self.log(f"  Поиск+атака -> {res}")
-
-        if self.actions.last_flasks is not None:
-            self.flasks = self.actions.last_flasks
-
-        if res == 'dispatched':
-            self._no_progress = 0
-        else:
-            self._no_progress += 1
-            if self._no_progress >= self.cfg.max_search_failures:
-                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
-                return Action('stop')
-        return Action('attack_mob')
 
     def _corruption_iteration(self):
         """Режим «Элитная скверна»: гейт по числу активных отрядов «Отряд N/4»,
@@ -323,6 +267,207 @@ class BotEngine:
                  f"{after} — сбор мог истечь, вступлением не считаю")
         return False
 
+    def _thief_iteration(self):
+        """Режим «Поиск вора»: ждём на зум-ине, бьём на отзуме.
+
+        Такая форма не из вкуса, а из замера: виджет «Отряд» на отзуме не
+        рисуется вовсе, и гейт там всегда видел бы «свободен». Зато отзум
+        даёт втрое больше целей в кадре, поэтому два щипка на убийство
+        (наружу перед выбором цели, внутрь после отправки) — честная цена
+        при цикле ≈70 секунд."""
+        if self.watchdog is not None:
+            verdict = self.watchdog.check()
+            if verdict == 'stop':
+                return Action('stop')
+            if verdict == 'recovered':
+                return None
+
+        # 1. Гейт отряда — только на зум-ине, виджета на отзуме нет.
+        gate = self._zoom_gate("close")
+        if gate is not True:
+            return gate
+        img = self.driver.screenshot()
+        squad = self.vision.squad_state(img)
+        if not self._squad_ready(squad):
+            self.log(f"Отряд занят ({squad}), ждём.")
+            self.sleep(self.human.idle_s(2.0))
+            return None
+
+        # 2. Вид для выбора цели.
+        gate = self._zoom_gate("skull")
+        if gate is not True:
+            return gate
+        # Сбрасываем счётчик ЗДЕСЬ, один раз за итерацию — когда оба гейта
+        # подряд привелись и итерация реально дошла до выбора цели. Сброс
+        # ВНУТРИ _zoom_gate (по каждому успеху отдельно) обнулял бы счётчик
+        # первым же гейтом «close», даже если «skull» стабильно не
+        # приводится: тогда zoom_fail_limit не достигался бы НИКОГДА, и бот
+        # вечно щипал бы туда-сюда молча вместо честной остановки.
+        self._zoom_fails = 0
+        img = self.driver.screenshot()
+        energy = self.vision.read_energy(img)
+        targets = [t for t in self.vision.leveled_targets(img)
+                   if t.level == self.cfg.thief_level
+                   and self._target_key(t) not in self.skip_targets]
+
+        # 3. Целей мало — перевозим камеру «Поиском». Но порог УСТУПАЕТ:
+        # после thief_searches_per_wave заходов бьём то, что видим, иначе
+        # редкая волна дала бы вечный цикл «ищу — мало — ищу» при живой
+        # цели перед носом.
+        if (len(targets) < self.cfg.thief_min_targets
+                and self._searches < self.cfg.thief_searches_per_wave):
+            self.log(f"[целей={len(targets)}] энергия={energy} -> «Поиск»")
+            return self._thief_search()
+        if not targets:
+            # Бюджет «Поисков» исчерпан, а целей всё ещё нет. Раньше отсюда
+            # снова звали _thief_search() — то есть ещё один «Поиск» вместо
+            # обещанного логом «жду волну». Единственный штатный выход из
+            # цикла (игра ответит 'no_wave') живьём НИ РАЗУ не подтверждался
+            # ни на одном прогоне — полагаться на него как на единственный
+            # тормоз нельзя. Спим сами, не дожидаясь честности игры.
+            self.log("Целей нет и «Поиск» их не даёт — жду волну.")
+            return self._thief_wait_for_wave()
+
+        # 4. Бьём ближайшего к центру: после «Поиска» камера стоит на воре.
+        self._searches = 0
+        refill = self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+        target = nearest(targets, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
+        self.log(f"[целей={len(targets)}] энергия={energy} склянок={self.flasks}"
+                 + (" (+рефилл разрешён)" if refill else "")
+                 + f" -> вор @({target.x},{target.y})")
+        if self.cfg.dry_run:
+            self.sleep(1.0)
+            return Action('attack_mob')
+
+        used_before = self.thief.flasks_used
+        res = self.thief.attack(target, refill=refill)
+        self.log(f"  Удар по вору -> {res}")
+        # Тот же приём, что в _corruption_iteration: «В наличии: N» точнее
+        # локального учёта, но если оно не прочлось — считаем потраченное
+        # локально и НЕ молчим об этом. Раньше эта ветка только читала
+        # last_flask_stock: если «В наличии» не прочлось, self.flasks
+        # оставался None, а refill = self.flasks is None разрешал бы
+        # рефилл навсегда — порог склянок молча переставал действовать.
+        spent = self.thief.flasks_used - used_before
+        if self.thief.last_flask_stock is not None:
+            self.flasks = self.thief.last_flask_stock
+        elif spent and self.flasks is not None:
+            self.flasks = max(0, self.flasks - spent)
+        elif spent:
+            self.log("  остаток склянок прочитать не удалось — порог не действует")
+        if spent:
+            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+        if res == 'stopped':
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
+        if res == 'low_energy':
+            self.log("Энергии не хватает — стоп. Пополни энергию и запусти снова.")
+            return Action('stop')
+        if res == 'not_thief':
+            # Ожидаемый исход неразличимых иконок, а НЕ провал: иначе три
+            # подряд обычных моба выключили бы бота на ровном месте.
+            self.skip_targets.add(self._target_key(target))
+            return Action('attack_mob')
+        if res == 'missed':
+            self.skip_targets.add(self._target_key(target))
+
+        if res == 'dispatched':
+            self._no_progress = 0
+        else:
+            self._no_progress += 1
+            if self._no_progress >= self.cfg.max_search_failures:
+                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+                return Action('stop')
+        return Action('attack_mob')
+
+    def _zoom_gate(self, want):
+        """Приводит карту к ступени want. True — можно продолжать; иначе
+        вызывающая ветка обязана вернуть то, что здесь возвращено
+        (None или Action('stop')).
+
+        ВАЖНО: успех НЕ сбрасывает self._zoom_fails здесь — гейтов в
+        итерации два («close» и «skull»), и сброс по каждому успеху
+        отдельно обнулял бы счётчик первым же гейтом, даже если второй
+        стабильно не приводится: zoom_fail_limit тогда не достигался бы
+        НИКОГДА (ревью Task 7, раунд 1, Important A). Сброс — забота
+        вызывающего кода, один раз за итерацию, когда оба гейта пройдены.
+
+        zoom.ensure() сам проверяет отмену внутри лестницы щипков (паузы
+        между ними ~1.3 с — окно для Стопа реальное) и при Стопе тоже
+        отдаёт False, не тапнув — снаружи это неотличимо от настоящей
+        невозможности привестись. Тот же класс бага уже чинили в
+        ThiefActions.search() (коммит 33cb819): если списать Стоп в обычный
+        провал зума, он попадёт в счётчик поломок бота, а лог соврёт про
+        причину остановки."""
+        if self.zoom.ensure(want):
+            return True
+        if self.cancel.stopped():
+            # Соседние точки выхода по Стопу пишут причину в лог (см. атаку
+            # и «Поиск» ниже) — здесь та же дисциплина: лог единственный
+            # диагностический артефакт проекта, и молчаливая остановка
+            # читалась бы человеком как «бот сам умер», а не «сам нажал».
+            self.log("  заход прерван по кнопке Стоп (во время приведения зума)")
+            return Action('stop')
+        return self._zoom_failed()
+
+    def _zoom_failed(self):
+        """Зум не привёлся. Копим неудачи ПОДРЯД, а не останавливаемся сразу:
+        разовая осечка бывает штатно (анимация не доехала, поверх кадра
+        всплыл баннер). Но и работать на чужом зуме нельзя — детекция
+        площадей врёт, и бот тапал бы мимо целей.
+
+        Возвращает None (ждём и пробуем снова) или Action('stop')."""
+        self._zoom_fails += 1
+        if self._zoom_fails >= self.cfg.zoom_fail_limit:
+            self.log(f"Зум не приводится {self._zoom_fails} раз подряд — стоп, нужен человек.")
+            return Action('stop')
+        self.sleep(self.human.idle_s(2.0))
+        return None
+
+    def _thief_search(self):
+        """Заход «Поиск» и разбор его исхода."""
+        if self.cfg.dry_run:
+            self.sleep(1.0)
+            return Action('attack_mob')
+        res = self.thief.search()
+        self.log(f"  «Поиск» -> {res}")
+        if res == 'stopped':
+            return Action('stop')
+        if res == 'searched':
+            self._searches += 1
+            # Камера уехала: экранные координаты пропусков больше ничего не
+            # значат, иначе бот пропускал бы новых воров в старых ячейках.
+            self.skip_targets.clear()
+            return Action('attack_mob')
+        if res in ('no_wave', 'no_event'):
+            return self._thief_wait_for_wave()
+        self._no_progress += 1
+        if self._no_progress >= self.cfg.max_search_failures:
+            self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+            return Action('stop')
+        return Action('attack_mob')
+
+    def _thief_wait_for_wave(self):
+        """Сон до следующей волны воров. Общая точка для ДВУХ входов:
+        «Поиск» ответил no_wave/no_event, и «бюджет Поисков исчерпан, а
+        целей всё ещё нет» в _thief_iteration — раньше вторая ветка вместо
+        сна снова звала _thief_search(), давая бесконечный цикл заходов в
+        меню (см. правку по итогу финального ревью). Копий быть не должно.
+
+        last_wave_seconds годится для обеих точек: ThiefActions.search()
+        читает таймер волны при КАЖДОМ заходе в окно, а сюда бот попадает
+        только после нескольких заходов подряд — таймер уже, скорее всего,
+        известен."""
+        wait = self.thief.last_wave_seconds
+        if wait is None or wait <= 0:
+            wait = self.cfg.thief_wave_poll_s
+        wait = min(wait, self.cfg.thief_wave_max_sleep_s)
+        self.log(f"Воров нет — сплю {int(wait)} с до следующей волны.")
+        self._searches = 0
+        self.skip_targets.clear()
+        self.sleep(self.human.idle_s(wait))
+        return None
+
     def one_iteration(self):
         # Стоп мог прийти, пока движок спал между итерациями
         if self.cancel.stopped():
@@ -331,8 +476,8 @@ class BotEngine:
             return self._join_iteration()
         if self.cfg.strategy == "corruption":
             return self._corruption_iteration()
-        if self.cfg.use_search_strategy:
-            return self._search_iteration()
+        if self.cfg.strategy == "thief":
+            return self._thief_iteration()
 
         img = self.driver.screenshot()
 

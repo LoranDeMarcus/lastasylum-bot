@@ -7,10 +7,9 @@ from src.models import GameState, Target
 from src.engine import BotEngine
 
 class FakeActions:
-    def __init__(self, search_result="dispatched", attack_result="dispatched"):
+    def __init__(self, attack_result="dispatched"):
         self.calls = []
         self._flasks = 300
-        self._search_result = search_result
         self._attack_result = attack_result
         self.last_flasks = None
         self.attack_kwargs = None
@@ -29,11 +28,6 @@ class FakeActions:
         return self._attack_result
     def assault_boss(self, t):
         self.calls.append(('assault', t)); return "dispatched"
-    def search_and_attack_mob(self, refill=False, want_flasks=False):
-        self.calls.append(('search', refill, want_flasks))
-        if want_flasks or refill:
-            self.last_flasks = self._flasks
-        return self._search_result
 
 class FakeDriver:
     def __init__(self, boom=False):
@@ -76,19 +70,10 @@ class FakeVision:
 
 def _mk_engine(actions, energy=130, targets=None, squad='idle', flasks=300,
                dry_run=False, driver=None, on_map=True):
-    # старые тесты проверяют map-based путь -> отключаем и search, и скверну
-    cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run,
-                 use_search_strategy=False, strategy="map")
+    # старые тесты проверяют map-based путь -> strategy="map" отключает скверну/join/вора
+    cfg = Config(screen_w=900, screen_h=1600, dry_run=dry_run, strategy="map")
     eng = BotEngine(driver=driver or FakeDriver(),
                     vision=FakeVision(energy, targets, squad, on_map),
-                    actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
-    eng.flasks = flasks
-    return eng
-
-def _mk_search_engine(actions, squad='idle', energy=130, flasks=300, targets=None):
-    cfg = Config(screen_w=900, screen_h=1600, use_search_strategy=True, strategy="thief")
-    eng = BotEngine(driver=FakeDriver(),
-                    vision=FakeVision(energy=energy, targets=targets, squad=squad),
                     actions=actions, cfg=cfg, log=lambda m: None, sleep=lambda s: None)
     eng.flasks = flasks
     return eng
@@ -308,133 +293,6 @@ def test_unreadable_stock_is_logged_not_silently_ignored():
     eng.one_iteration()
     assert any("прочитать не удалось" in s for s in lines)
 
-def test_search_strategy_searches_when_idle():
-    act = FakeActions()
-    eng = _mk_search_engine(act, squad='idle')
-    eng.one_iteration()
-    assert act.calls[0][0] == 'search'       # ищем вора и отправляем
-
-def test_search_start_does_not_open_energy_window_from_map():
-    """С карты «+» тапнет кнопку дома -> в режиме поиска склянки на старте НЕ
-    читаем (прочитаем пиггибеком на первом превью отправки)."""
-    act = FakeActions()
-    eng = _mk_search_engine(act, flasks=None)
-    eng.start()
-    assert ('flasks_left',) not in act.calls
-    assert eng.flasks is None
-
-def test_search_reads_flasks_on_first_dispatch():
-    act = FakeActions(); act._flasks = 240
-    eng = _mk_search_engine(act, flasks=None)
-    eng.one_iteration()
-    assert act.calls == [('search', False, True)]   # refill=False, want_flasks=True
-    assert eng.flasks == 240
-
-def test_search_requests_refill_when_energy_low():
-    act = FakeActions()
-    eng = _mk_search_engine(act, energy=12)         # < energy_refill_threshold
-    eng.one_iteration()
-    assert act.calls == [('search', True, False)]
-
-def test_search_stops_when_flasks_below_threshold():
-    act = FakeActions()
-    eng = _mk_search_engine(act, flasks=100)        # < flask_stop_threshold
-    a = eng.one_iteration()
-    assert a.type == 'stop'
-    assert act.calls == []                          # без тапов
-
-def test_search_stops_after_repeated_failures():
-    """«Поиск» перестал давать панель (событие кончилось/вёрстка иная) —
-    не долбимся вслепую, а останавливаемся и зовём человека."""
-    act = FakeActions(search_result="no_thief")
-    eng = _mk_search_engine(act)
-    for _ in range(eng.cfg.max_search_failures - 1):
-        assert eng.one_iteration().type != 'stop'
-    assert eng.one_iteration().type == 'stop'
-
-def test_search_failure_counter_resets_after_success():
-    act = FakeActions(search_result="no_thief")
-    eng = _mk_search_engine(act)
-    for _ in range(eng.cfg.max_search_failures - 1):
-        eng.one_iteration()                         # провалы, но ещё не стоп
-    act._search_result = "dispatched"
-    eng.one_iteration()                             # успех -> счётчик сброшен
-    act._search_result = "no_thief"
-    assert eng.one_iteration().type != 'stop'       # снова 1 провал подряд
-
-def test_search_strategy_waits_when_marching():
-    act = FakeActions()
-    eng = _mk_search_engine(act, squad='marching')
-    a = eng.one_iteration()
-    assert a is None
-    assert act.calls == []                   # отряд занят -> не ищем
-
-# --- Гибрид: фарм видимых соседей до нового «Поиска вора» ---
-
-def test_search_attacks_visible_neighbor_instead_of_searching():
-    act = FakeActions()
-    mob = Target('mob', 5, 460, 810)         # виден на текущем виде
-    eng = _mk_search_engine(act, targets=[mob])
-    eng.one_iteration()
-    assert ('attack', mob) in act.calls               # фармим соседа
-    assert not any(c[0] == 'search' for c in act.calls)   # без нового «Поиска»
-
-def test_search_falls_back_to_thief_when_no_neighbor_mobs():
-    act = FakeActions()
-    eng = _mk_search_engine(act, targets=[])          # соседей не видно
-    eng.one_iteration()
-    assert any(c[0] == 'search' for c in act.calls)
-    assert not any(c[0] == 'attack' for c in act.calls)
-
-def test_search_picks_neighbor_nearest_to_center():
-    act = FakeActions()
-    far = Target('mob', 5, 100, 200)
-    near = Target('mob', 5, 470, 780)        # центр экрана (450, 800)
-    eng = _mk_search_engine(act, targets=[far, near])
-    eng.one_iteration()
-    attacked = [c[1] for c in act.calls if c[0] == 'attack']
-    assert attacked == [near]                # ближайший к центру = короткий марш
-
-def test_search_ignores_boss_neighbor_and_searches():
-    act = FakeActions()
-    boss = Target('boss', 0, 460, 810)       # рогатый / ложный UI -> не моб
-    eng = _mk_search_engine(act, targets=[boss])
-    eng.one_iteration()
-    assert not any(c[0] == 'attack' for c in act.calls)   # босса соседом не фармим
-    assert any(c[0] == 'search' for c in act.calls)       # мобов нет -> поиск
-
-def test_search_reads_flasks_on_neighbor_dispatch():
-    act = FakeActions(); act._flasks = 240
-    mob = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, flasks=None, targets=[mob])
-    eng.one_iteration()
-    assert act.attack_kwargs == (False, True)   # refill=False, want_flasks=True
-    assert eng.flasks == 240
-
-def test_search_requests_refill_on_neighbor_when_energy_low():
-    act = FakeActions()
-    mob = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, energy=12, targets=[mob])   # < energy_refill_threshold
-    eng.one_iteration()
-    assert act.attack_kwargs == (True, False)
-
-def test_search_skips_phantom_neighbor_after_failed_attack():
-    act = FakeActions(attack_result="wrong_panel")
-    phantom = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, targets=[phantom])
-    eng.one_iteration()
-    assert eng._target_key(phantom) in eng.skip_targets   # не выбираем снова
-
-def test_search_stops_after_no_progress_across_neighbor_and_search():
-    """Промах по соседу (-> skip) и провал «Поиска» одинаково копят
-    «нет прогресса»; после порога — стоп и зов человека."""
-    act = FakeActions(search_result="no_thief", attack_result="missed")
-    mob = Target('mob', 5, 460, 810)
-    eng = _mk_search_engine(act, targets=[mob])
-    results = [eng.one_iteration() for _ in range(eng.cfg.max_search_failures)]
-    assert results[-1].type == 'stop'
-    assert all(r is None or r.type != 'stop' for r in results[:-1])
-
 def test_iteration_attacks_mob():
     act = FakeActions()
     mob = Target('mob', 5, 460, 810)
@@ -547,7 +405,7 @@ def test_read_state_handles_none_energy():
 def test_start_reads_flask_count():
     act = FakeActions(); act._flasks = 200
     eng = BotEngine(driver=None, vision=None, actions=act,
-                    cfg=Config(use_search_strategy=False, strategy="map"),
+                    cfg=Config(strategy="map"),
                     log=lambda m: None, sleep=lambda s: None)
     eng.start()
     assert eng.flasks == 200
@@ -568,7 +426,7 @@ def test_run_returns_error_on_start_exception():
             raise NotImplementedError("no OCR")
     logs = []
     eng = BotEngine(driver=None, vision=None, actions=BoomActions(),
-                    cfg=Config(use_search_strategy=False, strategy="map"),
+                    cfg=Config(strategy="map"),
                     log=logs.append, sleep=lambda s: None)
     reason = eng.run(threading.Event())
     assert reason == 'error'
@@ -680,3 +538,336 @@ def test_join_start_leaves_stock_unknown_until_read_from_game():
     assert eng.flasks is None
     assert any("присоединение" in m.lower() for m in lines)
     assert not any("рефилл" in m.lower() for m in lines)
+
+# --- Режим «Поиск вора» ---
+
+class ThiefFakeDriver:
+    def __init__(self):
+        self.taps = []
+    def screenshot(self):
+        return "frame"
+    def tap(self, target):
+        self.taps.append(tuple(target.center) if hasattr(target, "center") else tuple(target))
+    def back(self):
+        pass
+
+class ThiefFakeVision:
+    """Кадр один, ответы фиксированы: движок тут проверяется на решения,
+    а не на распознавание — оно своё в tests/test_vision.py."""
+    def __init__(self, squad="idle", leveled=(), energy=120):
+        self.squad = squad
+        self.leveled = list(leveled)
+        self.energy = energy
+    def squad_state(self, img):
+        return self.squad
+    def leveled_targets(self, img):
+        return self.leveled
+    def read_energy(self, img):
+        return self.energy
+
+class ThiefFakeActions:
+    def close_preview(self):
+        pass
+
+class FakeThief:
+    def __init__(self, search_result="searched", attack_result="dispatched",
+                 wave_seconds=None, spend=0, stock=None):
+        self.search_result = search_result
+        self.attack_result = attack_result
+        self.last_wave_seconds = wave_seconds
+        self.flasks_used = 0
+        self.last_flask_stock = None
+        self._spend = spend          # сколько склянок «тратит» удар (см. FakeCorruption)
+        self._stock = stock          # что «прочитано» в «В наличии: N»; None -> нечитаемо
+        self.calls = []
+    def search(self):
+        self.calls.append("search")
+        return self.search_result
+    def attack(self, target, refill=False):
+        self.calls.append(("attack", target.x, target.y, refill))
+        if refill:
+            self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+                self._stock -= self._spend
+        return self.attack_result
+
+class FakeZoom:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
+    def ensure(self, want):
+        self.calls.append(want)
+        return self.ok
+
+def _thief_cfg(**over):
+    cfg = Config()
+    cfg.strategy = "thief"
+    cfg.human_enabled = False        # без случайных пауз тест детерминирован
+    cfg.thief_min_targets = 1        # по умолчанию БЬЁМ; ветку поиска тесты
+    for k, v in over.items():        # включают явно, подняв порог
+        setattr(cfg, k, v)
+    return cfg
+
+def _thief_engine(vision, thief=None, zoom=None, cfg=None, sleeps=None, cancel=None):
+    eng = BotEngine(ThiefFakeDriver(), vision, ThiefFakeActions(),
+                    cfg or _thief_cfg(), log=lambda m: None,
+                    sleep=(sleeps.append if sleeps is not None else (lambda s: None)),
+                    thief=thief or FakeThief(), zoom=zoom or FakeZoom(),
+                    cancel=cancel)
+    eng.flasks = 500                 # выше порога: рефилл разрешён, стопа нет
+    return eng
+
+def test_thief_waits_while_squad_marching():
+    """Гейт читается на ЗУМ-ИНЕ: виджета «Отряд» на отзуме нет."""
+    v = ThiefFakeVision(squad="marching", leveled=[Target("mob", 5, 400, 900)])
+    z = FakeZoom()
+    eng = _thief_engine(v, zoom=z)
+    assert eng.one_iteration() is None
+    assert z.calls == ["close"]           # до отзума дело не дошло
+
+def test_thief_attacks_nearest_level_five():
+    """Уровень берётся из бейджа: цель ур.30 рядом с центром не трогаем."""
+    v = ThiefFakeVision(leveled=[
+        Target("mob", 5, 100, 100),       # далеко от центра
+        Target("mob", 5, 540, 900),       # ближе к центру
+        Target("mob", 30, 545, 905),      # ещё ближе, но не тот уровень
+    ])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert ("attack", 540, 900, True) in t.calls
+
+def test_thief_searches_when_too_few_targets():
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.one_iteration()
+    assert t.calls == ["search"]
+
+def test_thief_attacks_anyway_after_search_budget_spent():
+    """Редкая волна не должна давать вечный цикл «ищу — мало — ищу» при
+    живой цели перед носом."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t,
+                        cfg=_thief_cfg(thief_min_targets=3, thief_searches_per_wave=2))
+    for _ in range(3):
+        eng.one_iteration()
+    assert t.calls.count("search") == 2
+    assert ("attack", 540, 900, True) in t.calls
+
+def test_thief_not_a_thief_is_not_a_failure():
+    """Обычный моб ур.5 — ожидаемый исход неразличимых иконок, а не провал:
+    иначе три подряд таких моба выключили бы бота на ровном месте."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(attack_result="not_thief")
+    eng = _thief_engine(v, thief=t)
+    for _ in range(5):
+        eng.one_iteration()
+    assert eng._no_progress == 0
+    assert len(eng.skip_targets) == 1     # цель помечена, второй раз не берём
+
+def test_thief_stops_when_zoom_unfixable():
+    """Первая осечка — ждём, лимит подряд — стоп. Молча работать на чужом
+    зуме нельзя: детекция площадей врёт."""
+    v = ThiefFakeVision()
+    eng = _thief_engine(v, zoom=FakeZoom(ok=False))
+    actions = [eng.one_iteration() for _ in range(eng.cfg.zoom_fail_limit)]
+    assert actions[0] is None
+    assert actions[-1].type == "stop"
+
+def test_thief_sleeps_until_next_wave():
+    """Таймер волны 666 с -> спим столько, а не жмём «Поиск» вхолостую."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="no_wave", wave_seconds=666)
+    sleeps = []
+    eng = _thief_engine(v, thief=t, sleeps=sleeps)
+    assert eng.one_iteration() is None
+    assert max(sleeps) >= 600
+
+def test_thief_sleeps_when_search_budget_spent_and_still_no_targets():
+    """Critical (финальное ревью): бюджет «Поисков» исчерпан, целей всё ещё
+    нет, а «Поиск» продолжает отвечать 'searched' — живьём 'no_wave' от
+    игры ни разу не приходил, и полагаться на него как на единственный
+    выход из цикла нельзя. Бот обязан заснуть сам, а не долбить «Поиск»
+    вхолостую бесконечно (каждый заход — «Особое событие» + вкладка + два
+    щипка, риск бана за одинаковый макро-цикл)."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="searched", wave_seconds=None)
+    sleeps = []
+    eng = _thief_engine(v, thief=t, sleeps=sleeps,
+                        cfg=_thief_cfg(thief_min_targets=3, thief_searches_per_wave=2))
+    for _ in range(2):
+        eng.one_iteration()                  # исчерпываем бюджет «Поисков»
+    assert t.calls.count("search") == 2
+    action = eng.one_iteration()             # бюджет исчерпан, целей всё ещё нет
+    assert action is None                    # не 'attack_mob' — итерация просто ждёт
+    assert t.calls.count("search") == 2      # «Поиск» НЕ вызывали заново
+    assert sleeps                            # бот заснул до следующей волны
+
+# --- Регрессия: Стоп не должен считаться провалом (класс бага, который
+# ревью в этом плане уже ловило дважды в src/thief.py — коммиты 33cb819 и
+# 1a54392). Единственный тест на отказ моделирует «шаг сам не удался»
+# (FakeThief(...="failed") / FakeZoom(ok=False)) — это ДРУГОЕ, чем «шаг
+# прервали Стопом», и первое не доказывает отсутствие второго. ---
+
+class StoppingZoom:
+    """Как FakeZoom(ok=False), но имитирует то, что видит ZoomKeeper внутри
+    лестницы щипков: Стоп ловится ПОСЕРЕДИНЕ приведения зума, и он же вернул
+    False, не тапнув (см. tests/test_thief.py::StoppingZoom, тот же приём)."""
+    def __init__(self, cancel):
+        self.cancel = cancel
+        self.calls = []
+    def ensure(self, want):
+        self.calls.append(want)
+        self.cancel.set()
+        return False
+
+def test_thief_zoom_stop_is_not_a_zoom_failure():
+    """zoom.ensure() сам проверяет отмену внутри лестницы щипков и при
+    Стопе тоже отдаёт False, не тапнув — снаружи это неотличимо от
+    настоящей невозможности привестись. Движок обязан отличить их сам:
+    иначе Стоп попадёт в счётчик поломок зума, а лог соврёт про причину.
+
+    Заодно Minor 2 ревью раунда 1: молчаливая остановка по Стопу читалась
+    бы человеком как «бот сам умер» — лог обязан назвать причину."""
+    cancel = Cancel()
+    eng = _thief_engine(ThiefFakeVision(), zoom=StoppingZoom(cancel), cancel=cancel)
+    lines = []
+    eng.log = lines.append
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._zoom_fails == 0            # не «зум не приводится», а Стоп
+    assert any("стоп" in m.lower() for m in lines)   # причина не осталась в тишине
+
+class FlakySkullZoom:
+    """Зум-ин («close») приводится штатно каждый раз, зум для выбора цели
+    («skull») — никогда. Регрессия на Important A ревью раунда 1: счётчик
+    _zoom_fails раньше обнулялся ПЕРВЫМ гейтом («close» всегда успешен) и
+    никогда не доходил до zoom_fail_limit, хотя второй гейт стабильно рвётся —
+    бот вечно щипал бы туда-сюда и молчал вместо честной остановки."""
+    def __init__(self):
+        self.calls = []
+    def ensure(self, want):
+        self.calls.append(want)
+        return want == "close"
+
+def test_thief_zoom_counter_survives_a_working_first_gate():
+    """close приводится штатно на КАЖДОЙ итерации, skull — никогда. Лимит
+    zoom_fail_limit обязан быть достигнут, а не растворяться в успехе
+    первого гейта (см. FlakySkullZoom)."""
+    v = ThiefFakeVision()
+    z = FlakySkullZoom()
+    eng = _thief_engine(v, zoom=z)
+    actions = [eng.one_iteration() for _ in range(eng.cfg.zoom_fail_limit)]
+    assert actions[-1] is not None and actions[-1].type == "stop"
+
+def test_thief_attack_stopped_is_not_a_failure():
+    """thief.attack() вернул 'stopped' (кнопка нажата ПОСЕРЕДИНЕ захода,
+    не сам заход не удался) -> движок обязан остановиться, не наращивая
+    счётчик провалов отправки."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(attack_result="stopped")
+    eng = _thief_engine(v, thief=t)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._no_progress == 0
+
+def test_thief_search_stopped_is_not_a_failure():
+    """thief.search() вернул 'stopped' -> тоже стоп без наращивания
+    счётчика провалов («Поиск» прерван Стопом, а не сам не получился)."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="stopped")
+    eng = _thief_engine(v, thief=t)
+    action = eng.one_iteration()
+    assert action is not None and action.type == "stop"
+    assert eng._no_progress == 0
+
+# --- Minor 1 ревью раунда 1: сброс _searches и skip_targets.clear() не был
+# покрыт НИ ОДНИМ тестом — мутационная проверка ревьюера убрала обе строки
+# без единого красного теста. По одному тесту на каждую из четырёх точек
+# сброса (их две пары: перед отправкой и в ветке «волна кончилась»). ---
+
+def test_thief_search_budget_resets_after_a_dispatch():
+    """Счётчик «Поисков подряд» обязан сброситься не только когда волна
+    кончилась (no_wave/no_event), но и после обычной отправки — иначе
+    следующая волна с тем же малым числом целей начинается уже с
+    подорванным бюджетом «Поиска», доставшимся от предыдущей."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t,
+                        cfg=_thief_cfg(thief_min_targets=3, thief_searches_per_wave=2))
+    for _ in range(3):     # 2 «Поиска» исчерпывают бюджет, 3-й бьёт цель
+        eng.one_iteration()
+    assert eng._searches == 0
+
+def test_thief_search_budget_resets_when_wave_ends():
+    """То же самое, но для ветки «волна кончилась»: бюджет «Поисков» не
+    должен переползать в следующую волну частично исчерпанным."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="searched")
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.one_iteration()                    # один «Поиск» -> searches=1
+    assert eng._searches == 1
+    t.search_result = "no_wave"
+    t.last_wave_seconds = 100
+    eng.one_iteration()                    # волна кончилась -> сон
+    assert eng._searches == 0
+
+def test_thief_skip_targets_reset_after_a_successful_search():
+    """«Поиск» переносит камеру — старые пропуски по экранным координатам
+    больше ничего не значат. Без сброса бот пропустил бы нового вора,
+    попавшего в старую ячейку сетки."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="searched")
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.skip_targets.add(("mob", 27, 45))   # старая метка, до «Поиска»
+    eng.one_iteration()
+    assert eng.skip_targets == set()
+
+def test_thief_skip_targets_reset_when_wave_ends():
+    """То же самое для ветки «волна кончилась»: старые пропуски не должны
+    пережить переход к следующей волне."""
+    v = ThiefFakeVision(leveled=[])
+    t = FakeThief(search_result="no_wave", wave_seconds=100)
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(thief_min_targets=3))
+    eng.skip_targets.add(("mob", 3, 4))
+    eng.one_iteration()
+    assert eng.skip_targets == set()
+
+# --- Important (финальное ревью): порог склянок молча переставал действовать,
+# если «В наличии: N» после удара не прочлось — ThiefActions.flasks_used было
+# объявлено и не читалось никем. Тот же приём, что уже есть у скверны
+# (test_unreadable_stock_is_logged_not_silently_ignored). ---
+
+def test_thief_unreadable_stock_is_logged_not_silently_ignored():
+    """Склянки потрачены (flasks_used вырос), но «В наличии: N» не
+    прочиталось (last_flask_stock остался None) -> порог перестаёт
+    действовать, и молчать об этом нельзя: refill = self.flasks is None
+    иначе разрешил бы рефилл навсегда."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(spend=2, stock=None)
+    eng = _thief_engine(v, thief=t)
+    eng.flasks = None            # остаток пока неизвестен (как после старта)
+    lines = []
+    eng.log = lines.append
+    eng.one_iteration()
+    assert any("прочитать не удалось" in s for s in lines)
+
+def test_thief_subtracts_spent_when_stock_unreadable_but_known():
+    """Остаток был известен (500), стока «В наличии» не прочлось -> считаем
+    локально (500 - потрачено), а не остаёмся слепы к порогу."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(spend=2, stock=None)
+    eng = _thief_engine(v, thief=t)          # eng.flasks == 500 (см. _thief_engine)
+    eng.one_iteration()
+    assert eng.flasks == 498
+
+def test_thief_prefers_read_stock_over_local_count():
+    """Прочитанное «В наличии: N» точнее локального счёта — как у скверны."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief(spend=2, stock=273)
+    eng = _thief_engine(v, thief=t)          # локальный учёт (500) был бы неверен
+    eng.one_iteration()
+    assert eng.flasks == 273

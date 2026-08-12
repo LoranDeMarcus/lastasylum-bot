@@ -575,3 +575,165 @@ def test_join_cards_sorts_slots_by_x_even_if_match_order_differs():
     xs = [s.x for s in cards[0].slots]
     assert len(xs) == 2
     assert xs == sorted(xs)          # слева направо, а не в порядке find_all
+
+# --- Режим «Поиск вора»: уровень цели из бейджа под иконкой ---
+
+def _thief_vision():
+    cfg = Config()
+    return cfg, Vision(cfg, TemplateReader(cfg))
+
+def test_leveled_targets_reads_five_under_skulls():
+    """Кадр отзума с ворами: почти у всех целей бейдж читается как 5.
+
+    Не «у всех»: 13 целей, 11 читаются ровно как 5, одна как «51» (склейка
+    соседних цифр), у одной бейдж за нижним краем кадра. Нечитаемый бейдж
+    безопасен — цель просто пропускается, ложного тапа не будет."""
+    cfg, v = _thief_vision()
+    img = cv2.imread("reference/40_thief_map_skull.png")
+    fives = [t for t in v.leveled_targets(img) if t.level == 5]
+    assert len(fives) >= 10
+
+def test_leveled_targets_finds_nothing_readable_on_pin_zoom():
+    """Пин-зум: жёлтые блобы есть (повозки), бейджа нет ни у одного.
+
+    Это и делает бейдж доказательством зума, а не только фильтром цели.
+    Список целей проверяем непустым отдельно: all() на пустой
+    последовательности истинно, и без этой проверки тест продолжил бы
+    зеленеть, даже если детекция блобов сломается и вернёт ноль целей —
+    перестав доказывать то, ради чего написан."""
+    cfg, v = _thief_vision()
+    img = cv2.imread("reference/41_thief_map_pin.png")
+    targets = v.leveled_targets(img)
+    assert len(targets) > 0
+    assert all(t.level is None for t in targets)
+
+def test_leveled_targets_reads_boss_levels_too():
+    """Уровень берётся из бейджа, а не из kind: у рогатых он свой."""
+    cfg, v = _thief_vision()
+    img = cv2.imread("reference/01_worldmap_zoomed_out.png")
+    levels = {t.level for t in v.leveled_targets(img)}
+    assert 5 in levels
+    assert levels & {30, 70}
+
+def test_find_targets_behaviour_unchanged():
+    """Регрессия: старый find_targets после рефакторинга отдаёт то же."""
+    cfg, v = _thief_vision()
+    img = cv2.imread("reference/01_worldmap_zoomed_out.png")
+    kinds = sorted(t.kind for t in v.find_targets(img))
+    assert kinds.count("mob") == 6
+    assert kinds.count("boss") == 2
+
+# --- Режим «Поиск вора»: ступени зума и экраны ---
+
+def test_map_zoom_recognises_three_steps():
+    """Легенды карты мало: она видна и на скулл-зуме, и на пин-зуме.
+    Различает их только бейдж."""
+    cfg, v = _thief_vision()
+    assert v.map_zoom(cv2.imread("reference/40_thief_map_skull.png")) == "skull"
+    assert v.map_zoom(cv2.imread("reference/41_thief_map_pin.png")) == "far"
+    assert v.map_zoom(cv2.imread("reference/42_thief_map_close.png")) == "close"
+
+def test_map_zoom_unknown_on_modal():
+    cfg, v = _thief_vision()
+    assert v.map_zoom(cv2.imread("reference/43_thief_tab.png")) == "unknown"
+    # База — не ступень зума карты: легенды карты там нет, но якорь HUD
+    # энергии жив (замер 0.911) и без явной проверки map_zoom принял бы её
+    # за 'close', а следующий шаг флоу тапнул бы в базе как по кнопке события
+    # (event_button там же ложно даёт 0.98-0.99).
+    assert v.map_zoom(cv2.imread("reference/29_base_view.png")) == "unknown"
+    # Превью отправки — модалка режима, тоже не ступень зума: она не
+    # перекрывает легенду и бейджи целиком (замер: 3 из 4 бейджей вокруг
+    # неё на этом кадре остаются читаемыми), и без проверки thief_screen
+    # map_zoom вернул бы 'skull' чисто по везению раскладки этого кадра —
+    # в другой раскладке та же модалка могла бы закрыть все бейджи и
+    # соврать 'far'.
+    assert v.map_zoom(cv2.imread("reference/45_thief_preview.png")) == "unknown"
+
+def test_map_zoom_skull_without_any_targets_still_reads_skull():
+    """Бейдж в этой игре висит под ЛЮБЫМ объектом карты (кристаллы, деревья,
+    ресурсные точки), не только под целями. Определение зума не должно
+    зависеть от того, есть ли в кадре хоть одна цель — иначе конец волны
+    (целей в кадре нет, штатное состояние, ради которого и существует
+    «Поиск») на скулл-зуме читался бы как пин-зум, и ensure('skull') после
+    удачного «Поиска» вечно щипал бы туда-сюда, ни разу не доехав до
+    реальной ступени (см. Important B ревью раунда 1).
+
+    Кадра «скулл-зум без единой цели» в репозитории нет — синтезируем:
+    берём настоящий скулл-зум и замазываем ТОЛЬКО иконки целей (даёт
+    _target_blobs) фоновым цветом. Бейджи под ними не трогаем — читаются
+    ли ИМЕННО они, независимо от икон, и есть суть проверки."""
+    cfg, v = _thief_vision()
+    img = cv2.imread("reference/40_thief_map_skull.png")
+    blobs = v._target_blobs(img)
+    assert len(blobs) >= 10          # сцена и правда богата целями до замазки
+    bg = (60, 140, 60)               # BGR-зелень: вне HSV обеих масок (цели/бейджи)
+    for _kind, cx, cy, w, h in blobs:
+        x0, y0 = max(0, cx - w // 2), max(0, cy - h // 2)
+        img[y0:y0 + h, x0:x0 + w] = bg
+    assert v.leveled_targets(img) == []     # целей действительно не осталось
+    assert v.map_zoom(img) == "skull"
+
+def test_thief_tab_open():
+    cfg, v = _thief_vision()
+    assert v.thief_tab_open(cv2.imread("reference/43_thief_tab.png"))
+    assert not v.thief_tab_open(cv2.imread("reference/12_event_dialog_WRONG.png"))
+    assert not v.thief_tab_open(cv2.imread("reference/13_corruption_dialog.png"))
+
+def test_thief_panel_on_both_thief_frames():
+    """Две панели вора из РАЗНЫХ сессий: порог не подогнан под один кадр."""
+    cfg, v = _thief_vision()
+    assert v.thief_panel(cv2.imread("reference/44_thief_panel.png"))
+    assert v.thief_panel(cv2.imread("reference/02_mob_panel_ataka.png"))
+    assert not v.thief_panel(cv2.imread("reference/09_boss_panel_shturm.png"))
+    assert not v.thief_panel(cv2.imread("reference/45_thief_preview.png"))
+
+def test_wave_seconds_reads_timer():
+    """«00:11:06» -> 666 секунд, а не 1106: цифры склеиваются без двоеточий,
+    поэтому разбираем их как ЧЧММСС, а не как одно число."""
+    cfg, v = _thief_vision()
+    assert v.wave_seconds(cv2.imread("reference/43_thief_tab.png")) == 666
+
+def test_wave_seconds_parses_valid_raw_without_leading_hour_zeros():
+    """Синтетика в обход TemplateReader/картинки: FixedReader(1106) — то же
+    «00:11:06», что и на живом кадре, но напрямую доказывает разбор ЧЧММСС,
+    не завися от региона/детекции цифр. Без позитивного случая рядом с
+    негативными тест мусора мог бы выродиться в «всегда None»."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(1106))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)   # FixedReader его не читает
+    assert v.wave_seconds(blank) == 666
+
+def test_wave_seconds_none_when_raw_exceeds_ceiling():
+    """Потолок 995959 («99:59:59») — защита от мусора: значение крупнее
+    этого не может быть валидным таймером ни при каком разборе ЧЧММСС.
+
+    Значение 999999 сюда НЕ годится: ЧЧ=99 ММ=99 СС=99 — оно уже отсеется
+    проверкой `m > 59`, и тест доказал бы чужую ветку вместо потолка. Взято
+    1000006: ЧЧ=100 ММ=00 СС=06 — минуты и секунды валидны, единственное,
+    что может его остановить, — сама потолочная проверка `raw > 995959`
+    (без неё вернулось бы 100*3600+0*60+6 = 360006)."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(1000006))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)
+    assert v.wave_seconds(blank) is None
+
+def test_wave_seconds_none_when_minutes_invalid():
+    """raw=6106 -> ЧЧ=00, ММ=61, СС=06 — минут «61» не бывает, мусор."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(6106))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)
+    assert v.wave_seconds(blank) is None
+
+def test_wave_seconds_none_when_seconds_invalid():
+    """raw=1161 -> ЧЧ=00, ММ=11, СС=61 — секунд «61» не бывает, мусор."""
+    cfg = Config()
+    v = Vision(cfg, FixedReader(1161))
+    blank = np.full((1920, 1080, 3), 100, dtype=np.uint8)
+    assert v.wave_seconds(blank) is None
+
+def test_classify_screen_knows_thief_screens():
+    """Без этих классов сторож в боевом режиме глушил бы бота на каждом
+    заходе «Поиска»: окно события и панель вора давали 'unknown'."""
+    cfg, v = _thief_vision()
+    assert v.classify_screen(cv2.imread("reference/43_thief_tab.png")) == "thief_tab"
+    assert v.classify_screen(cv2.imread("reference/45_thief_preview.png")) == "thief_preview"

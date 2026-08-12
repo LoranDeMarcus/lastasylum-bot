@@ -106,36 +106,6 @@ class Actions:
             return "wrong_panel"
         return self._dispatch_mob_from_panel(refill=refill, want_flasks=want_flasks)
 
-    def search_thief(self):
-        """«Особое событие» -> «Поиск вора» -> «Поиск» -> тап найденного моба
-        (центрируется у базы -> короткий марш). Возвращает 'attack' если
-        открылась панель моба, иначе None. Координаты — фикс. вёрстка диалога."""
-        self.driver.tap(self.cfg.tap_box("event_button", self.cfg.event_button_xy));           self.human.after_tap(1.2)
-        self.driver.tap(self.cfg.tap_box("search_thief_tab", self.cfg.search_thief_tab_xy));   self.human.after_tap(0.6)
-        self.driver.tap(self.cfg.tap_box("search_button", self.cfg.search_button_xy));         self.human.after_tap(1.6)
-        self.driver.tap(self.cfg.tap_box("target", self.cfg.search_result_xy));                self.human.after_tap(1.0)
-        act = self.vision.panel_action(self.driver.screenshot())
-        if act is None:
-            # диалог события мог остаться открытым (вора нет / вёрстка иная) —
-            # закрываем BACK'ом, иначе следующая итерация тапает по меню вслепую
-            self.driver.back()
-            self.human.after_tap(0.6)
-        return act
-
-    def search_and_attack_mob(self, refill=False, want_flasks=False):
-        """Найти вора у базы и отправить отряд 2. Статусы как у attack_mob.
-        refill — применить фиолетовую склянку в превью; want_flasks — просто
-        прочитать остаток склянок там же (окно энергии только с превью)."""
-        act = self.search_thief()
-        if act is None:
-            self.log("  «Поиск» не дал панели моба")
-            return "no_thief"
-        if act != "attack":
-            self.log(f"  «Поиск» открыл '{act}' вместо моба -> отмена")
-            self.close_preview()
-            return "wrong_panel"
-        return self._dispatch_mob_from_panel(refill=refill, want_flasks=want_flasks)
-
     def assault_boss(self, target):
         act = self.open_target_panel(target)
         if act is None:
