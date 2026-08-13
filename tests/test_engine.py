@@ -1116,6 +1116,51 @@ def test_armed_engine_drops_the_arm_if_preview_vanished():
     assert eng._armed is False
     assert not any(c[0] == "fire" for c in t.calls)
 
+# --- Финальное ревью перед слиянием thief-speedup: 4 правки ---
+
+def test_armed_engine_accepts_low_energy_preview_and_fires():
+    """Important: превью «Увеличить энергию» (reference/26_preview_low_energy.png)
+    classify_screen различает от 'thief_preview' — это тот же взведённый
+    экран, просто игра нашла, что энергии не хватает. Раньше движок требовал
+    РОВНО 'thief_preview' и на этом варианте снимал взвод, теряя
+    подготовленный такт (~18 с) при каждом рефилле (раз в 10 отправок,
+    проверено на живой игре). fire() сам уйдёт в ветку _low_energy(refill) —
+    конвейеру достаточно не спутать эту помеху с настоящим закрытием."""
+    v = PreviewVision(["idle"], screen="preview_low_energy")
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 8
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._armed is False
+    assert ("fire", True) in t.calls
+
+def test_armed_engine_waits_while_squad_card_unrecognized():
+    """Critical: карточку не опознали (None) — трактуем как «занят», а не
+    как «свободен». Отправка вслепую стоила бы 10 энергии. Мутация
+    `if state in (None, 'busy')` -> `if state == 'busy'` не роняла ни
+    одного теста до этой правки — эта проверка её ловит."""
+    v = PreviewVision([None])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    assert eng.one_iteration() is None
+    assert not any(c[0] == "fire" for c in t.calls)
+    assert eng._armed is True
+
+def test_armed_engine_respects_send_next_on_return_flag():
+    """Important: cfg.send_next_on_return молча не работал в конвейерном
+    пути — обычный путь спрашивает self._squad_ready(state), а конвейер
+    слал по 'returning' безусловно. Флаг обязан действовать в обоих."""
+    v = PreviewVision(["returning"])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(send_next_on_return=False))
+    eng._armed = True
+    assert eng.one_iteration() is None
+    assert not any(c[0] == "fire" for c in t.calls)
+    assert eng._armed is True
+
 # --- Раунд исправления 1: подтверждение отправки по энергии. Живой прогон
 # 2026-08-13 поймал заход 79->79, отрапортованный игрой как 'dispatched',
 # хотя энергия не потратилась ни на йоту — движок обнулил _no_progress

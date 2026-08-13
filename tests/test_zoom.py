@@ -101,15 +101,22 @@ class FakeHuman:
 
 def test_settle_pause_comes_from_config():
     """Пауза после жеста — настройка: с 8 шагами жест короче, и карта
-    доезжает анимацией уже ПОСЛЕ возврата управления."""
+    доезжает анимацией уже ПОСЛЕ возврата управления.
+
+    Значение НАМЕРЕННО отличается от дефолта cfg.pinch_settle_s (2.0, см.
+    config.py) — тем же приёмом, что и test_gives_up_after_fail_limit ниже:
+    при совпадении со значением по умолчанию тест не отличил бы код,
+    читающий паузу из конфига, от кода с захардкоженной константой 2.0 —
+    обе версии остались бы зелёными (проверено мутацией: after_tap(2.0)
+    вместо after_tap(self.cfg.pinch_settle_s) тест не ронял)."""
     cfg = _cfg()
-    cfg.pinch_settle_s = 2.0
+    cfg.pinch_settle_s = 3.7
     human = FakeHuman()
     d = FakeDriver("close")
     k = ZoomKeeper(d, FakeVision(), cfg, log=lambda m: None, sleep=lambda s: None,
                    human=human)
     assert k.ensure("skull") is True
-    assert 2.0 in human.after_tap_calls
+    assert 3.7 in human.after_tap_calls
 
 def test_gives_up_after_fail_limit():
     """Щипок не двигает карту -> не долбимся вечно.

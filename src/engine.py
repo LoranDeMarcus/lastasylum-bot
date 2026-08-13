@@ -125,8 +125,12 @@ class BotEngine:
         self.flasks оставался None, а refill = (self.flasks is None) разрешал
         бы рефилл навсегда — порог склянок молча переставал действовать.
 
-        Один метод на оба пути отправки (обычный и конвейерный): двух копий
-        этого учёта в проекте уже быть не должно.
+        Один метод на оба пути отправки РЕЖИМА ВОРА (обычный и конвейерный):
+        двух копий этого учёта здесь уже быть не должно. У «Элитной скверны»
+        (_corruption_iteration) жива своя копия того же учёта — это
+        осознанно не тронуто этой правкой (разные режимы, рефакторить
+        скверну задача не просила), но врать, что копий нигде больше нет,
+        комментарий не должен.
 
         Возвращает spent: раунд исправления 2 использует его же в
         _dispatch_confirmed (рефилл ломает подтверждение по энергии) —
@@ -453,7 +457,7 @@ class BotEngine:
 
         # 4. Бьём ближайшего к центру: после «Поиска» камера стоит на воре.
         self._searches = 0
-        refill = self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+        refill = self._refill_allowed()
         target = nearest(targets, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
         self.log(f"[целей={len(targets)}] энергия={energy} склянок={self.flasks}"
                  + (" (+рефилл разрешён)" if refill else "")
@@ -593,15 +597,26 @@ class BotEngine:
         него. Гейт читается по карточке отряда в самом превью: верхний
         виджет «Отряд» превью перекрывает."""
         img = self.driver.screenshot()
-        if self.vision.classify_screen(img) != 'thief_preview':
+        # 'preview_low_energy' — ТОТ ЖЕ взведённый экран, просто игра
+        # подменила «Отправиться» на «Увеличить энергию» (нехватка энергии).
+        # Раньше здесь требовалось РОВНО 'thief_preview', и на этом варианте
+        # взвод снимался, теряя подготовленный такт (~18 с) при каждом
+        # рефилле (раз в 10 отправок, живой прогон 2026-08-13,
+        # reference/26_preview_low_energy.png). fire() ниже сам разберёт
+        # разницу: кнопки на кадре нет -> уйдёт в _low_energy(refill).
+        if self.vision.classify_screen(img) not in ('thief_preview', 'preview_low_energy'):
             self.log("Превью закрылось само — снимаю взвод.")
             self._armed = False
             return Action('attack_mob')
 
         state = self.vision.preview_squad_state(img, self.cfg.mob_squad)
-        # None = карточку не опознали. Трактуем как «занят»: лишнее ожидание
-        # дешевле отправки вслепую.
-        if state in (None, 'busy'):
+        # Тот же гейт, что и в обычном пути (см. _squad_ready): 'idle' ->
+        # готов, 'returning' -> по флагу send_next_on_return, 'busy' и
+        # None (карточку не опознали) -> занят. Раньше здесь стояла своя
+        # инлайн-проверка `state in (None, 'busy')`, которая слала по
+        # 'returning' БЕЗУСЛОВНО — флаг send_next_on_return в конвейере
+        # молча не действовал.
+        if not self._squad_ready(state):
             self._armed_polls += 1
             if self._armed_polls >= self.cfg.armed_poll_limit:
                 self.log("Отряд не освободился за отведённое время — закрываю превью.")
