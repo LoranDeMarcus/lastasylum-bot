@@ -1,3 +1,4 @@
+import math
 import random
 import struct
 import subprocess
@@ -5,6 +6,13 @@ from typing import Protocol
 import numpy as np
 import cv2
 from src.models import Box
+
+def _dist(p, q):
+    """Расстояние между пальцами — единственная величина щипка, от которой
+    зависит зум: игра считает его по ОТНОШЕНИЮ конечного расстояния к
+    начальному. Всё остальное (где жест на экране, под каким углом) на зум
+    не влияет, поэтому разбрасывать можно только это остальное."""
+    return math.hypot(p[0] - q[0], p[1] - q[1])
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 RAW_RGBA_8888 = 1          # screencap отдаёт этот формат (замер: format=1)
@@ -201,14 +209,61 @@ class AdbDriver:
     _PINCH_NEAR = ((540, 830), (540, 1090))    # пальцы сведены (ближе к центру)
     _PINCH_FAR = ((540, 600), (540, 1320))     # пальцы разведены
 
+    def _pinch_geometry(self, out):
+        """Точки и число шагов одного щипка: (a0, a1, b0, b1, steps).
+
+        Жест разбрасывается, потому что пиксельно одинаковый щипок —
+        машинный признак, а в режиме вора это самый частый жест вообще: два
+        на каждого убитого вора. Но разбрасывается СТРОГО то, что на зум не
+        влияет, и это главное в методе:
+
+        - положение и наклон оси не влияют вовсе (щипок — про расстояние
+          между пальцами, а не про то, где они на экране), поэтому их
+          двигаем щедро: это бесплатная случайность;
+        - число точек решает скачок между соседними событиями, а игра
+          перестаёт считать жест щипком, когда скачок велик (замер: 14 px —
+          без срывов, 38 px — срыв 1 из 5, 57 px — 3 из 6);
+        - расстояния между пальцами оставляем откалиброванными. Зум задаётся
+          ОТНОШЕНИЕМ конечного расстояния к начальному, и полоса под одну
+          ступень узкая (ход 230 px — ступень, 295 px — перелёт в пин-зум,
+          190 px — недобор). A/B живьём показал, что разброс расстояний на
+          надёжность не влияет (7/8 против 7/8), поэтому выбран простой
+          вариант: трогаем только то, что заведомо безразлично.
+
+        При `human_enabled=False` отдаём ровно откалиброванный жест: живые
+        замеры и `tools/*` должны воспроизводиться точь-в-точь."""
+        (an, bn), (af, bf) = self._PINCH_NEAR, self._PINCH_FAR
+        if not self.cfg.human_enabled:
+            steps = self.cfg.pinch_steps
+            return (af, an, bf, bn, steps) if out else (an, af, bn, bf, steps)
+
+        near, far = _dist(an, bn), _dist(af, bf)      # ровно калиброванные
+        jx, jy = self.cfg.pinch_jitter_px
+        cx = (an[0] + bn[0]) / 2 + self._rng.uniform(-jx, jx)
+        cy = (an[1] + bn[1]) / 2 + self._rng.uniform(-jy, jy)
+        angle = math.radians(self._rng.uniform(-self.cfg.pinch_angle_deg,
+                                               self.cfg.pinch_angle_deg))
+        ux, uy = math.sin(angle), math.cos(angle)
+
+        def pair(sep):
+            h = sep / 2
+            return ((int(round(cx - ux * h)), int(round(cy - uy * h))),
+                    (int(round(cx + ux * h)), int(round(cy + uy * h))))
+
+        (a_near, b_near), (a_far, b_far) = pair(near), pair(far)
+        lo, hi = self.cfg.pinch_steps_range
+        steps = self._rng.randint(lo, hi)
+        return ((a_far, a_near, b_far, b_near, steps) if out
+                else (a_near, a_far, b_near, b_far, steps))
+
     def zoom_out(self):
         """Отзум: два пальца сходятся к центру."""
-        (an, bn), (af, bf) = self._PINCH_NEAR, self._PINCH_FAR
-        self._pinch(af, an, bf, bn)
+        a0, a1, b0, b1, steps = self._pinch_geometry(out=True)
+        self._pinch(a0, a1, b0, b1, steps=steps)
 
     def zoom_in(self):
         """Зум-ин: два пальца расходятся от центра. Зеркало zoom_out —
         нужен, чтобы откатить перелёт отзума и чтобы дотянуться до кнопок
         событий: они видны только на зум-ине."""
-        (an, bn), (af, bf) = self._PINCH_NEAR, self._PINCH_FAR
-        self._pinch(an, af, bn, bf)
+        a0, a1, b0, b1, steps = self._pinch_geometry(out=False)
+        self._pinch(a0, a1, b0, b1, steps=steps)

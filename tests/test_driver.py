@@ -1,3 +1,4 @@
+import math
 import random
 import struct
 import subprocess
@@ -235,8 +236,15 @@ def test_fast_screencap_can_be_switched_off():
 def test_pinch_takes_step_count_from_config():
     """Число точек жеста — настройка, а не константа: замер 2026-08-13
     показал, что время жеста линейно по числу событий (~52 мс на событие),
-    и 8 шагов вместо 16 срезают щипок с 6,0 до 3,3 с при том же улове."""
+    и 8 шагов вместо 16 срезают щипок с 6,0 до 3,3 с при том же улове.
+
+    human_enabled=False здесь обязателен: с включённым антибот-разбросом
+    число шагов берётся из pinch_steps_range, а pinch_steps остаётся
+    КАЛИБРОВАННОЙ базой детерминированного пути — именно её этот тест и
+    сторожит (см. test_pinch_step_count_never_drops_below_calibrated_floor
+    для разбрасываемого пути)."""
     cfg = Config()
+    cfg.human_enabled = False
     cfg.pinch_steps = 3
     drv = AdbDriver(cfg)
     sent = []
@@ -248,3 +256,64 @@ def test_pinch_takes_step_count_from_config():
     assert release == [(0, 2, 0), (0, 0, 0)]
     # (steps + 1) кадров, в каждом 2 пальца x 3 события + общий SYN
     assert len(gesture) == (3 + 1) * 7 + 2
+
+# --- разброс щипка (антибот) ---
+
+def _dist(p, q):
+    return math.hypot(p[0] - q[0], p[1] - q[1])
+
+def test_pinch_geometry_differs_between_gestures():
+    """Жест с одинаковыми координатами — машинный признак, а щипок в режиме
+    вора самый частый: два на каждого убитого. Человек, щипающий полсотни
+    раз в час, ни разу не повторит точки."""
+    drv = AdbDriver(Config())
+    first = drv._pinch_geometry(out=True)
+    others = [drv._pinch_geometry(out=True) for _ in range(20)]
+    assert all(g != first for g in others)
+
+def test_pinch_preserves_calibrated_finger_distances():
+    """Разброс не должен трогать расстояния между пальцами: зум задаётся их
+    ОТНОШЕНИЕМ, а полоса под одну ступень узкая (ход 230 px — ступень,
+    295 px — перелёт в пин-зум, 190 px — недобор). A/B живьём показал, что
+    разброс расстояний надёжность не ухудшает (7/8 против 7/8), так что это
+    решение в пользу простоты, а не вынужденное. Тест сторожит принятое
+    решение: смещение и наклон на отношение не влияют, поэтому оба
+    расстояния обязаны оставаться калиброванными при ЛЮБОМ разбросе."""
+    cfg = Config()
+    drv = AdbDriver(cfg)
+    (an, bn), (af, bf) = drv._PINCH_NEAR, drv._PINCH_FAR
+    near, far = _dist(an, bn), _dist(af, bf)
+    for _ in range(200):
+        a0, a1, b0, b1, _ = drv._pinch_geometry(out=True)
+        assert abs(_dist(a1, b1) - near) <= 1.5, _dist(a1, b1)   # ±1 px — округление
+        assert abs(_dist(a0, b0) - far) <= 1.5, _dist(a0, b0)
+
+def test_pinch_step_count_never_drops_below_calibrated_floor():
+    """8 шагов — измеренный пол: при 230 px это 28.75 px на событие, а
+    38 px давали срыв 1 из 5 и 57 px — 3 из 6. Ниже опускаться нельзя,
+    выше — только за деньги времени (~52 мс на событие)."""
+    drv = AdbDriver(Config())
+    seen = {drv._pinch_geometry(out=True)[4] for _ in range(200)}
+    assert min(seen) >= 8
+    assert max(seen) <= 11
+    assert len(seen) > 1, "число шагов не разбрасывается"
+
+def test_pinch_stays_on_screen():
+    """Смещение и наклон не должны уводить палец за край экрана."""
+    cfg = Config()
+    drv = AdbDriver(cfg)
+    for _ in range(200):
+        pts = drv._pinch_geometry(out=True)[:4]
+        for x, y in pts:
+            assert 0 <= x <= cfg.screen_w, (x, y)
+            assert 0 <= y <= cfg.screen_h, (x, y)
+
+def test_pinch_is_exactly_calibrated_when_human_disabled():
+    """Выключенный антибот -> ровно откалиброванный жест: tools/* и живые
+    замеры должны воспроизводиться точь-в-точь."""
+    cfg = Config()
+    cfg.human_enabled = False
+    drv = AdbDriver(cfg)
+    (an, bn), (af, bf) = drv._PINCH_NEAR, drv._PINCH_FAR
+    assert drv._pinch_geometry(out=True) == (af, an, bf, bn, cfg.pinch_steps)
+    assert drv._pinch_geometry(out=False) == (an, af, bn, bf, cfg.pinch_steps)
