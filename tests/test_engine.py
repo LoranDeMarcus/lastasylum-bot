@@ -554,15 +554,25 @@ class ThiefFakeDriver:
 class ThiefFakeVision:
     """Кадр один, ответы фиксированы: движок тут проверяется на решения,
     а не на распознавание — оно своё в tests/test_vision.py."""
-    def __init__(self, squad="idle", leveled=(), energy=120):
+    def __init__(self, squad="idle", leveled=(), energy=120, energy_after=None):
         self.squad = squad
         self.leveled = list(leveled)
         self.energy = energy
+        # Что вернёт read_energy НАЧИНАЯ со второго чтения (подтверждение
+        # отправки читает энергию ещё раз ПОСЛЕ удара, см.
+        # BotEngine._dispatch_confirmed) — тот же приём, что у
+        # FakeVision._active_after для join/скверны. None -> энергия не
+        # меняется на протяжении вызовов, как было раньше.
+        self.energy_after = energy_after
+        self.energy_reads = 0
     def squad_state(self, img):
         return self.squad
     def leveled_targets(self, img):
         return self.leveled
     def read_energy(self, img):
+        self.energy_reads += 1
+        if self.energy_reads > 1 and self.energy_after is not None:
+            return self.energy_after
         return self.energy
     def classify_screen(self, img):
         return "world_map"          # по умолчанию помех поверх карты нет
@@ -1038,9 +1048,13 @@ class PreviewVision(ThiefFakeVision):
         return self._states.pop(0) if self._states else "idle"
 
 def test_after_dispatch_engine_arms_the_next_thief():
-    """Смысл конвейера: подготовка следующей цели уходит ПОД марш."""
+    """Смысл конвейера: подготовка следующей цели уходит ПОД марш.
+
+    energy_after=100 (< 120-5) — отправка ПОДТВЕРЖДЕНА, иначе _arm_next()
+    не позвался бы вовсе (см. _dispatch_confirmed, раунд исправления 1)."""
     v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900),
-                                 Target("mob", 5, 300, 700)])
+                                 Target("mob", 5, 300, 700)],
+                        energy=120, energy_after=100)
     t = ArmingThief()
     eng = _thief_engine(v, thief=t)
     eng.one_iteration()
@@ -1093,3 +1107,90 @@ def test_armed_engine_drops_the_arm_if_preview_vanished():
     eng.one_iteration()
     assert eng._armed is False
     assert not any(c[0] == "fire" for c in t.calls)
+
+# --- Раунд исправления 1: подтверждение отправки по энергии. Живой прогон
+# 2026-08-13 поймал заход 79->79, отрапортованный игрой как 'dispatched',
+# хотя энергия не потратилась ни на йоту — движок обнулил _no_progress
+# впустую. Гипотеза «взвели того же вора, к которому уже идёт отряд» НЕ
+# подтвердилась проверкой по координатам (240 px от центра у холостого
+# случая против 194 и 464 px у успешных) — чинится сам факт, а не
+# предполагаемый механизм. ---
+
+def test_armed_engine_confirms_dispatch_by_energy_drop():
+    """Энергия упала на 10 (реальная цена удара, замер спеки) -> отправка
+    засчитана, _no_progress обнулён (живой прогон: 98->88)."""
+    v = PreviewVision(["returning"], energy=88)     # единственное чтение — «после»
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 98
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+
+def test_armed_engine_rejects_dispatch_without_energy_drop():
+    """Энергия не изменилась (79->79, живой прогон 2026-08-13) -> НЕ
+    прогресс: _no_progress растёт, цель уходит в skip_targets, чтобы
+    следующий взвод не взял её снова."""
+    v = PreviewVision(["returning"], energy=79)
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 79
+    target = Target("mob", 5, 540, 900)
+    eng._armed_target = target
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+
+def test_armed_engine_stops_after_repeated_unconfirmed_dispatches():
+    """Три неподтверждённые отправки подряд — стоп и зов человека, тот же
+    предел, что у соседних ветвей провала (max_search_failures)."""
+    v = PreviewVision(["returning"] * 5, energy=79)
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    target = Target("mob", 5, 540, 900)
+    last = None
+    for _ in range(eng.cfg.max_search_failures):
+        eng._armed = True
+        eng._armed_energy_before = 79
+        eng._armed_target = target
+        last = eng.one_iteration()
+    assert last is not None and last.type == 'stop'
+
+def test_armed_engine_treats_unreadable_energy_as_success_but_logs_it():
+    """Энергию прочитать можно не всегда -> ложная тревога дороже
+    пропуска: отправка считается успешной, но лог не молчит об этом."""
+    v = PreviewVision(["returning"], energy=None)
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 98
+    eng._armed_target = Target("mob", 5, 540, 900)
+    lines = []
+    eng.log = lines.append
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert any("подтвердить не могу" in s for s in lines)
+
+def test_thief_normal_path_confirms_dispatch_by_energy_drop():
+    """Обычный (неконвейерный) путь ведёт себя так же, как взведённый:
+    энергия упала — отправка засчитана."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)],
+                        energy=98, energy_after=88)
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+
+def test_thief_normal_path_rejects_dispatch_without_energy_drop():
+    """И тот же гейт в обычном пути: энергия не упала — НЕ прогресс, цель
+    уходит в skip_targets. Одна проверка на оба пути, как и требовалось
+    (см. _dispatch_confirmed)."""
+    target = Target("mob", 5, 540, 900)
+    v = ThiefFakeVision(leveled=[target], energy=79, energy_after=79)
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets

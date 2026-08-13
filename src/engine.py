@@ -41,6 +41,13 @@ class BotEngine:
         # Конвейер: превью следующего вора открыто и ждёт только отряда.
         self._armed = False
         self._armed_polls = 0
+        # Энергия ДО отправки (снята на зум-скулле в _arm_next) и цель,
+        # которую взвели — нужны для подтверждения отправки по энергии
+        # (см. _dispatch_confirmed): живой прогон 2026-08-13 поймал заход
+        # 79->79, отрапортованный игрой как 'dispatched', хотя энергия не
+        # потратилась ни на йоту.
+        self._armed_energy_before = None
+        self._armed_target = None
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
         self._no_progress = 0       # подряд итераций без отправки (в любом активном режиме)
         self._zoom_fails = 0        # подряд неудачных приведений зума
@@ -132,6 +139,41 @@ class BotEngine:
 
     def _refill_allowed(self):
         return self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+
+    def _dispatch_confirmed(self, energy_before):
+        """Действительно ли отправка потратила энергию — а не просто закрыла
+        превью вхолостую. Живой прогон 2026-08-13 (раунд исправления 1,
+        задача 7): цепочка энергии 98->88->78->79->69->59->49 — между
+        второй и третьей отправкой энергия успела САМА отрасти на 1
+        (78->79), а сама третья отправка прошла как 79->79 и не потратила
+        ничего; движок при этом отрапортовал 'dispatched' и обнулил
+        счётчик провалов. Гипотеза «взвели того же вора, к которому уже
+        идёт отряд» (камера центрируется на нём) проверкой по координатам
+        НЕ подтвердилась — 240 px от центра у холостого случая против 194
+        и 464 px у успешных, — поэтому чинится сам факт ложного успеха, а
+        не предполагаемый механизм (он неизвестен).
+
+        Вор стоит 10 энергии (замер спеки), но она сама отрастает по ходу
+        цикла — порог не РОВНО 10, а НЕ МЕНЬШЕ 5 (cfg.thief_dispatch_energy_drop):
+        разделяет 0 и 10 с запасом и не путает естественный прирост с
+        подтверждением.
+
+        Читать энергию можно не всегда (до — только на зум-скулле, после —
+        как только закрылось превью) -> любое из двух чтений может дать
+        None. Тогда сравнивать нечего: ложная тревога тут дороже пропуска,
+        считаем отправку успешной, как раньше, но не молчим об этом в
+        логе — тот же приём, что у нечитаемого остатка склянок в
+        _account_flasks."""
+        energy_after = self.vision.read_energy(self.driver.screenshot())
+        if energy_before is None or energy_after is None:
+            self.log("  энергию до/после отправки прочитать не удалось — "
+                     "подтвердить не могу, считаю успешной")
+            return True
+        if energy_before - energy_after >= self.cfg.thief_dispatch_energy_drop:
+            return True
+        self.log(f"  отправка НЕ подтвердилась: энергия была {energy_before}, "
+                 f"стала {energy_after} — прогрессом не считаю")
+        return False
 
     def _corruption_iteration(self):
         """Режим «Элитная скверна»: гейт по числу активных отрядов «Отряд N/4»,
@@ -396,6 +438,12 @@ class BotEngine:
         if res == 'missed':
             self.skip_targets.add(self._target_key(target))
 
+        # Тот же ложный успех возможен и здесь: `energy` — значение,
+        # прочитанное ДО удара чуть выше в этой же итерации. Один метод на
+        # оба пути отправки (обычный и конвейерный) — см. _dispatch_confirmed.
+        if res == 'dispatched' and not self._dispatch_confirmed(energy):
+            self.skip_targets.add(self._target_key(target))
+            res = 'unconfirmed'
         if res == 'dispatched':
             self._no_progress = 0
             self._arm_next()
@@ -533,6 +581,13 @@ class BotEngine:
         if res == 'low_energy':
             self.log("Энергии не хватает — стоп. Пополни энергию и запусти снова.")
             return Action('stop')
+        # Игра может отрапортовать 'dispatched', ничего не потратив (живой
+        # прогон 2026-08-13: заход 79->79) — см. _dispatch_confirmed. Тот же
+        # приём, что у неподтверждённого вступления в _join_iteration:
+        # понижаем 'dispatched' до провала, дальше он идёт обычной веткой.
+        if res == 'dispatched' and not self._dispatch_confirmed(self._armed_energy_before):
+            self.skip_targets.add(self._target_key(self._armed_target))
+            res = 'unconfirmed'
         if res == 'dispatched':
             self._no_progress = 0
             self._arm_next()
@@ -553,6 +608,9 @@ class BotEngine:
         if not self.zoom.ensure("skull"):
             return
         img = self.driver.screenshot()
+        # Энергия ДО отправки — только здесь, на зум-скулле, HUD ещё виден:
+        # внутри превью read_energy() отдаёт None (HUD там перекрыт).
+        energy_before = self.vision.read_energy(img)
         targets = [t for t in self.vision.leveled_targets(img)
                    if t.level == self.cfg.thief_level
                    and self._target_key(t) not in self.skip_targets]
@@ -564,6 +622,8 @@ class BotEngine:
         if res == 'armed':
             self._armed = True
             self._armed_polls = 0
+            self._armed_energy_before = energy_before
+            self._armed_target = target
         elif res in ('not_thief', 'missed'):
             self.skip_targets.add(self._target_key(target))
 
