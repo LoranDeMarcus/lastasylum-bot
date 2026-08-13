@@ -1140,8 +1140,19 @@ def test_armed_engine_rejects_dispatch_without_energy_drop():
     """Энергия не изменилась (79->79, живой прогон 2026-08-13) -> НЕ
     прогресс: _no_progress растёт, цель уходит в skip_targets, чтобы
     следующий взвод не взял её снова. И конвейер не взводит следующую цель
-    вхолостую (раунд исправления 2, недостающая проверка)."""
-    v = PreviewVision(["returning"], energy=79)
+    вхолостую (раунд исправления 2, недостающая проверка).
+
+    Раунд исправления 3: `leveled` обязан содержать ВТОРУЮ, доступную цель
+    (300,700 — дальше от центра 540,960, поэтому выбор первой цели не
+    меняется). Без неё `_arm_next()`, даже если бы движок ошибочно его
+    позвал, вышел бы на `if not targets: return` раньше вызова `thief.arm()`
+    (единственная цель в кадре — та же самая, только что помеченная
+    непроходимой) — и `assert not any(c[0] == "arm" ...)` был бы верен
+    ЛЮБОЙ ценой, тест не различал бы поломку. Ревьюер проверил принудительным
+    вызовом `eng._arm_next()` сразу после итерации: без второй цели
+    `"arm"` не появляется в `t.calls` НИ ПРИ КАКОМ поведении движка."""
+    v = PreviewVision(["returning"], energy=79,
+                      leveled=[Target("mob", 5, 300, 700)])
     t = ArmingThief()
     eng = _thief_engine(v, thief=t)
     eng._armed = True
@@ -1196,9 +1207,19 @@ def test_thief_normal_path_confirms_dispatch_by_energy_drop():
 def test_thief_normal_path_rejects_dispatch_without_energy_drop():
     """И тот же гейт в обычном пути: энергия не упала — НЕ прогресс, цель
     уходит в skip_targets, конвейер не взводится вхолостую. Одна проверка
-    на оба пути, как и требовалось (см. _dispatch_confirmed)."""
+    на оба пути, как и требовалось (см. _dispatch_confirmed).
+
+    Раунд исправления 3: без ВТОРОЙ цели (300,700 — дальше от центра,
+    выбор первой не меняется) единственная цель в `leveled` — это та же
+    самая (540,900), которую неподтверждённая отправка только что положила
+    в `skip_targets`, и она же там и отфильтровывается фильтром `leveled`
+    в `_arm_next()`. Тест не различал бы поломку «движок ошибочно позвал
+    _arm_next()» — со второй целью различает (проверено ревьюером
+    принудительным вызовом `eng._arm_next()`: без второй цели `"arm"` не
+    появляется ни при какой поломке)."""
     target = Target("mob", 5, 540, 900)
-    v = ThiefFakeVision(leveled=[target], energy=79, energy_after=79)
+    v = ThiefFakeVision(leveled=[target, Target("mob", 5, 300, 700)],
+                        energy=79, energy_after=79)
     t = FakeThief()
     eng = _thief_engine(v, thief=t)
     eng.one_iteration()
@@ -1213,7 +1234,15 @@ def test_thief_normal_path_rejects_dispatch_without_energy_drop():
 def test_armed_engine_treats_flask_refill_as_confirmed_despite_energy_rise():
     """Рефилл (склянка потрачена ЗА ЭТОТ заход, flasks_used вырос) — судить
     по энергии нельзя вовсе: реальный живой случай, где энергия ВЫРОСЛА
-    (8 -> 58) после честной отправки."""
+    (8 -> 58) после честной отправки.
+
+    Раунд исправления 3, «помельче»: закрепляю флаг короткого замыкания,
+    а не только его следствие. `v.energy_reads == 1` — единственное чтение
+    энергии за итерацию идёт из СЛЕДУЮЩЕГО _arm_next() (взвод следующей
+    цели), а не из _dispatch_confirmed: значит flask_spent сработал ДО
+    какого-либо чтения энергии. Мутация «flask_spent всегда False»
+    (проводка раунда 2 как бы удалена) дала бы energy_reads == 2 и всё
+    равно прошла бы по одной ветке роста энергии — эта проверка её ловит."""
     v = PreviewVision(["returning"], energy=58)
     t = ArmingThief(spend=2)          # fire(refill=True) «тратит» склянку
     eng = _thief_engine(v, thief=t)
@@ -1223,6 +1252,7 @@ def test_armed_engine_treats_flask_refill_as_confirmed_despite_energy_rise():
     eng.one_iteration()
     assert eng._no_progress == 0
     assert eng.skip_targets == set()
+    assert v.energy_reads == 1
 
 def test_armed_engine_treats_energy_rise_as_confirmed_even_without_tracked_spend():
     """Симметричный случай (независимый от учёта склянок): энергия ВЫРОСЛА
@@ -1240,7 +1270,12 @@ def test_armed_engine_treats_energy_rise_as_confirmed_even_without_tracked_spend
 
 def test_thief_normal_path_treats_flask_refill_as_confirmed_despite_energy_rise():
     """И в обычном пути: рефилл (spend>0) — не повод объявлять отправку
-    холостой, даже если энергия выросла."""
+    холостой, даже если энергия выросла.
+
+    Раунд исправления 3: `v.energy_reads == 2` (чтение ДО удара + чтение
+    внутри последующего _arm_next()) закрепляет, что flask_spent
+    короткозамкнул _dispatch_confirmed — БЕЗ этой ветки было бы 3 чтения
+    (добавилось бы ещё одно внутри самого _dispatch_confirmed)."""
     target = Target("mob", 5, 540, 900)
     v = ThiefFakeVision(leveled=[target], energy=8, energy_after=58)
     t = FakeThief(spend=2)
@@ -1248,3 +1283,41 @@ def test_thief_normal_path_treats_flask_refill_as_confirmed_despite_energy_rise(
     eng.one_iteration()
     assert eng._no_progress == 0
     assert eng.skip_targets == set()
+    assert v.energy_reads == 2
+
+# --- Раунд исправления 3 (Important, перепроверка): симметричная защита
+# «энергия выросла -> рефилл» была БЕЗ порога и возвращала исходный дефект
+# через чёрный ход — естественный прирост (78->79, тот самый живой замер)
+# тоже «энергия выросла», значит тоже проходил бы как рефилл. Ревьюер
+# собрал сцену на фейках: холостая отправка (0 энергии), прирост +1,
+# склянка НЕ тратилась -> ARMED и NORMAL оба давали no_progress=0,
+# skip_targets=set(), лог врал про рефилл. ---
+
+def test_armed_engine_rejects_small_energy_rise_as_natural_regen_not_refill():
+    """Рост энергии МЕНЬШЕ порога рефилла (78->79, живой замер естественного
+    прироста между отправками) — НЕ рефилл, склянка не тратилась
+    (spend=0), отправка НЕ подтверждена."""
+    v = PreviewVision(["returning"], energy=79,
+                      leveled=[Target("mob", 5, 300, 700)])
+    t = ArmingThief()          # spend=0 — рефилла не было
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 78
+    target = Target("mob", 5, 540, 900)
+    eng._armed_target = target
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
+
+def test_thief_normal_path_rejects_small_energy_rise_as_natural_regen_not_refill():
+    """Тот же живой сценарий (78->79, без траты склянки) в обычном пути."""
+    target = Target("mob", 5, 540, 900)
+    v = ThiefFakeVision(leveled=[target, Target("mob", 5, 300, 700)],
+                        energy=78, energy_after=79)
+    t = FakeThief()             # spend=0 — рефилла не было
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
