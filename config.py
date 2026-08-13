@@ -106,7 +106,7 @@ class Config:
     # --- Режим «Поиск вора» (Золотые воры, событие) ---
     # strategy: "corruption" | "join" | "thief" | "map"
     thief_level: int = 5                       # уровень Золотого вора
-    thief_min_targets: int = 3                 # целей меньше -> жмём «Поиск» снова
+    thief_min_targets: int = 1                 # «Поиск» зовём только на ПУСТОМ кадре
     thief_searches_per_wave: int = 3           # столько «Поисков» без целей -> волна выбита
     thief_wave_poll_s: float = 300.0           # фолбэк, если таймер волны не прочитался
     thief_wave_max_sleep_s: float = 900.0      # потолок сна: защита от кривого таймера

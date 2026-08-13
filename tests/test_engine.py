@@ -645,6 +645,22 @@ def test_thief_searches_when_too_few_targets():
     eng.one_iteration()
     assert t.calls == ["search"]
 
+def test_production_config_attacks_a_single_visible_thief():
+    """Порог берётся из ПРОИЗВОДСТВЕННОГО конфига, а не из хелпера.
+
+    Живьём (прогон 2, итерация 24) бот видел двух воров, одного ровно в
+    центре, и всё равно уходил в меню за «Поиском» — заход стоит 21-24 с.
+    Хелпер _thief_cfg ставит порог 1 сам, поэтому дефолт 3 не проверялся."""
+    cfg = Config()
+    cfg.strategy = "thief"
+    cfg.human_enabled = False
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t, cfg=cfg)
+    eng.one_iteration()
+    assert "search" not in t.calls
+    assert ("attack", 540, 900, True) in t.calls
+
 def test_thief_attacks_anyway_after_search_budget_spent():
     """Редкая волна не должна давать вечный цикл «ищу — мало — ищу» при
     живой цели перед носом."""
