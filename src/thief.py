@@ -30,9 +30,6 @@ class ThiefActions:
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
         self.last_wave_seconds = None
-        # заполняется в arm() перед возвратом "armed", читается ТОЛЬКО
-        # attack() сразу же в этом кадре стека — см. комментарии в arm()/fire()
-        self._armed_img = None
         self.energy = EnergyRefill(driver, vision, cfg, log=log, sleep=sleep,
                                    human=self.human, cancel=self.cancel)
 
@@ -164,20 +161,27 @@ class ThiefActions:
         self.human.after_tap(1.6)
         return self.vision.find_button(self.driver.screenshot(), "attack")
 
-    def arm(self, target):
-        """Первая половина удара: открыть панель, подтвердить вора, нажать
-        «Атака» и оставить превью открытым. Энергию НЕ тратит.
+    def _arm_core(self, target):
+        """Ядро взвода: открыть панель, подтвердить вора, нажать «Атака» и
+        убедиться, что превью открылось. Энергию НЕ тратит.
 
-        Отдельно от отправки, потому что подготовка (замер 2026-08-13: 18 с)
-        может идти ПОКА отряд в марше, а отправка — только когда он
-        освободился.
+        Возвращает (статус, кадр). Кадр — это ТОТ САМЫЙ снимок, которым
+        только что подтвердили «превью открылось»; наружу (в arm()) он не
+        уходит — отдаётся только attack(), и только затем, чтобы решение
+        «что показывает превью» внутри ОДНОГО синхронного удара принималось
+        по тому же кадру, что и «превью открылось» — ровно как делал старый
+        монолитный attack() (один кадр на обе проверки, без окна
+        рассинхрона между ними). Публичный fire() конвейера (вызывается
+        отдельно, спустя марш) такого кадра никогда не получает и не должен:
+        за время марша состояние экрана могло реально измениться, и старый
+        кадр там означал бы отправку вслепую.
 
-        'armed' | 'not_thief' | 'missed' | 'failed' | 'stopped'."""
+        'armed' | 'not_thief' | 'missed' | 'failed' | 'stopped', кадр или None."""
         if self.cancel.stopped():
-            return "stopped"
+            return "stopped", None
         pos = self._open_panel(target)
         if pos is None:
-            return "stopped" if self.cancel.stopped() else "missed"
+            return ("stopped" if self.cancel.stopped() else "missed"), None
 
         # Цель подтверждается ЗДЕСЬ, а не по иконке: на отзуме Золотой вор и
         # рядовой моб ур.5 — один и тот же жёлтый череп с бейджем «5». Тап по
@@ -187,10 +191,10 @@ class ThiefActions:
             self.log("  это не Золотой вор, а обычный моб ур.5 -> пропускаю")
             self.actions.close_preview()
             self.human.after_tap(0.6)
-            return "not_thief"
+            return "not_thief", None
 
         if self.cancel.stopped():
-            return "stopped"
+            return "stopped", None
         self.driver.tap(pos)
         self.human.after_tap(2.0)
 
@@ -202,34 +206,39 @@ class ThiefActions:
                 and self.vision.find_button(img, "boost_energy") is None):
             # между тапом «Атака» и этим кадром была настоящая пауза (2 с) —
             # окно, где человек мог успеть нажать Стоп
-            return "stopped" if self.cancel.stopped() else self._abort("превью отправки не открылось")
-        # Кадр, которым только что подтвердили открытие превью, запоминаем
-        # для attack(): между этим кадром и решением fire() внутри ОДНОГО
-        # синхронного вызова не проходит времени, экран заведомо тот же —
-        # старый цельный attack() и принимал решение по этому же кадру, без
-        # второго скриншота. В конвейере (BotEngine вызывает fire() отдельно,
-        # когда отряд освободился после марша) этот кадр не передаётся —
-        # пройдёт реальное время, и fire() обязан смотреть заново (докстринг).
-        self._armed_img = img
-        return "armed"
+            return ("stopped" if self.cancel.stopped()
+                    else self._abort("превью отправки не открылось")), None
+        return "armed", img
 
-    def fire(self, refill=False, _img=None):
-        """Вторая половина: отправка из УЖЕ открытого превью.
+    def arm(self, target):
+        """Первая половина удара: открыть панель, подтвердить вора, нажать
+        «Атака» и оставить превью открытым. Энергию НЕ тратит.
 
-        refill — разрешено ли потратить фиолетовую склянку +50, если игра
-        сказала, что энергии не хватает (решение принимает движок по порогу).
+        Отдельно от отправки, потому что подготовка (замер 2026-08-13: 18 с)
+        может идти ПОКА отряд в марше, а отправка — только когда он
+        освободился. Публичная точка отдаёт наружу только статус: конвейеру
+        (движку) кадр, которым это подтверждено, не нужен и опасен — если
+        его протащить в fire(), вызванный намного позже, вместо свежей
+        проверки готовности отряда получится отправка по устаревшей картинке.
 
-        _img — приватный параметр только для attack(): готовый кадр из
-        arm(), чтобы не дублировать скриншот, снятый мгновение назад в том
-        же вызове (см. комментарий в конце arm()). Извне (движок конвейера,
-        тесты) не передаётся — тогда экран снимается заново, как и требует
-        контракт метода: между отдельным arm() и отдельным fire() реально
-        прошёл марш, старый кадр мог устареть.
+        'armed' | 'not_thief' | 'missed' | 'failed' | 'stopped'."""
+        status, _ = self._arm_core(target)
+        return status
+
+    def _fire_core(self, refill, img):
+        """Ядро отправки: решить по УЖЕ снятому кадру превью, отправлять
+        отряд или сначала качать энергию, и довести дело до конца.
+
+        Отдельно от fire(), чтобы attack() мог передать сюда кадр,
+        снятый _arm_core() мгновение назад (тот же кадр, что уже подтвердил
+        «превью открылось» — между решениями ноль времени, точно как в
+        старом монолитном attack()), а публичная fire() конвейера была
+        обязана сама снимать экран заново перед вызовом ядра — старый кадр
+        через полминуты марша ничего не гарантирует.
 
         'dispatched' | 'failed' | 'low_energy' | 'stopped'."""
         if self.cancel.stopped():
             return "stopped"
-        img = _img if _img is not None else self.driver.screenshot()
         send = self.vision.find_button(img, "dispatch")
         if send is None:
             if self.vision.find_button(img, "boost_energy") is not None:
@@ -242,12 +251,28 @@ class ThiefActions:
         # (мощь 13M против 670K).
         return self._dispatch(send)
 
+    def fire(self, refill=False):
+        """Вторая половина: отправка из УЖЕ открытого превью.
+
+        refill — разрешено ли потратить фиолетовую склянку +50, если игра
+        сказала, что энергии не хватает (решение принимает движок по порогу).
+
+        Кадр снимает САМА, безусловно: это и есть публичная точка входа
+        конвейера — вызывается отдельно от arm(), когда отряд освободился
+        после марша, и только свежий снимок отражает текущую готовность
+        (кнопка могла смениться, энергия — измениться).
+
+        'dispatched' | 'failed' | 'low_energy' | 'stopped'."""
+        if self.cancel.stopped():
+            return "stopped"
+        return self._fire_core(refill, self.driver.screenshot())
+
     def attack(self, target, refill=False):
         """Один удар по цели целиком: взвод + отправка.
 
         'dispatched' | 'not_thief' | 'missed' | 'failed' | 'low_energy' | 'stopped'."""
-        res = self.arm(target)
-        return res if res != "armed" else self.fire(refill=refill, _img=self._armed_img)
+        status, img = self._arm_core(target)
+        return status if status != "armed" else self._fire_core(refill, img)
 
     def _low_energy(self, refill):
         """Энергии меньше стоимости: игра подменила «Отправиться» на
