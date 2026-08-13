@@ -564,6 +564,8 @@ class ThiefFakeVision:
         return self.leveled
     def read_energy(self, img):
         return self.energy
+    def classify_screen(self, img):
+        return "world_map"          # по умолчанию помех поверх карты нет
 
 class ThiefFakeActions:
     def close_preview(self):
@@ -593,8 +595,9 @@ class FakeThief:
         return self.attack_result
 
 class FakeZoom:
-    def __init__(self, ok=True):
+    def __init__(self, ok=True, last_failure='stuck'):
         self.ok = ok
+        self.last_failure = None if ok else last_failure
         self.calls = []
     def ensure(self, want):
         self.calls.append(want)
@@ -692,6 +695,82 @@ def test_thief_stops_when_zoom_unfixable():
     actions = [eng.one_iteration() for _ in range(eng.cfg.zoom_fail_limit)]
     assert actions[0] is None
     assert actions[-1].type == "stop"
+
+class BannerVision(ThiefFakeVision):
+    """Баннер закрыл якорь HUD: экран не опознан, зума не определить."""
+    def __init__(self):
+        super().__init__(squad="idle", leveled=[])
+    def map_zoom(self, img):
+        return "unknown"
+    def classify_screen(self, img):
+        return "unknown"
+
+class ModalVision(ThiefFakeVision):
+    """Поверх карты осталось СВОЁ превью: ожиданием не лечится, надо закрыть."""
+    def __init__(self):
+        super().__init__(squad="idle", leveled=[])
+        self.closed = False
+    def map_zoom(self, img):
+        return "close" if self.closed else "unknown"
+    def classify_screen(self, img):
+        return "game_view" if self.closed else "thief_preview"
+
+class ClosingActions:
+    def __init__(self, vision):
+        self.vision = vision
+        self.closed = 0
+    def close_preview(self):
+        self.closed += 1
+        self.vision.closed = True
+
+def _zoom_engine(vision, zoom, actions=None, cfg=None, sleeps=None):
+    eng = BotEngine(ThiefFakeDriver(), vision, actions or ThiefFakeActions(),
+                    cfg or _thief_cfg(), log=lambda m: None,
+                    sleep=(sleeps.append if sleeps is not None else (lambda s: None)),
+                    thief=FakeThief(), zoom=zoom)
+    eng.flasks = 500
+    return eng
+
+def test_unrecognized_screen_is_waited_out_not_counted_as_broken_zoom():
+    """Живьём бот встал за 6 с из-за баннера, закрывшего якорь HUD (замер:
+    скор 0.364 при пороге 0.7). Баннер уходит сам — его надо пережидать, а
+    не звать человека."""
+    sleeps = []
+    eng = _zoom_engine(BannerVision(),
+                       FakeZoom(ok=False, last_failure='unknown_screen'),
+                       sleeps=sleeps)
+    for _ in range(Config().zoom_fail_limit):
+        assert eng.one_iteration() is None          # ни одного стопа
+    assert eng._zoom_fails == 0                     # это НЕ провал зума
+    assert max(sleeps) >= Config().zoom_unknown_wait_s
+
+def test_unrecognized_screen_eventually_gives_up():
+    """Но и ждать вечно нельзя: терпение конечно, просто оно длиннее."""
+    cfg = _thief_cfg(zoom_unknown_limit=2)
+    eng = _zoom_engine(BannerVision(),
+                       FakeZoom(ok=False, last_failure='unknown_screen'), cfg=cfg)
+    assert eng.one_iteration() is None
+    assert eng.one_iteration().type == 'stop'
+
+def test_stuck_pinch_still_stops_after_the_old_limit():
+    """Сломанный щипок — прежнее поведение, терпение тут ни при чём."""
+    eng = _zoom_engine(ThiefFakeVision(squad="idle", leveled=[]),
+                       FakeZoom(ok=False, last_failure='stuck'))
+    for _ in range(Config().zoom_fail_limit - 1):
+        assert eng.one_iteration() is None
+    assert eng.one_iteration().type == 'stop'
+
+def test_own_modal_is_closed_instead_of_waited_out():
+    """Своё превью ожиданием не уйдёт — его закрывают. И это не провал зума:
+    иначе три всплывших окна подряд выключали бы бота."""
+    v = ModalVision()
+    acts = ClosingActions(v)
+    eng = _zoom_engine(v, FakeZoom(ok=False, last_failure='unknown_screen'),
+                       actions=acts)
+    assert eng.one_iteration() is None
+    assert acts.closed == 1
+    assert eng._zoom_fails == 0
+    assert eng._zoom_unknowns == 0
 
 def test_thief_sleeps_until_next_wave():
     """Таймер волны 666 с -> спим столько, а не жмём «Поиск» вхолостую."""

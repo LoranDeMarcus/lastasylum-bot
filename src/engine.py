@@ -41,6 +41,9 @@ class BotEngine:
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
         self._no_progress = 0       # подряд итераций без отправки (в любом активном режиме)
         self._zoom_fails = 0        # подряд неудачных приведений зума
+        # неопознанный экран считаем ОТДЕЛЬНО от сломанного щипка: у них
+        # разные лечения (переждать против «позвать человека») и разный запас
+        self._zoom_unknowns = 0
         self._searches = 0          # «Поисков» подряд без набора целей
         # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
         # а не раннер: подтверждение видно только здесь, а «dispatched» от
@@ -304,6 +307,7 @@ class BotEngine:
         # приводится: тогда zoom_fail_limit не достигался бы НИКОГДА, и бот
         # вечно щипал бы туда-сюда молча вместо честной остановки.
         self._zoom_fails = 0
+        self._zoom_unknowns = 0
         img = self.driver.screenshot()
         energy = self.vision.read_energy(img)
         targets = [t for t in self.vision.leveled_targets(img)
@@ -410,13 +414,47 @@ class BotEngine:
             return Action('stop')
         return self._zoom_failed()
 
+    # Экраны, которые бот открывает сам и умеет закрыть тапом по затемнению.
+    # Имена — ровно те, что возвращает Vision.classify_screen.
+    _OWN_MODALS = ('thief_tab', 'thief_preview', 'energy_window',
+                   'preview', 'preview_low_energy', 'dialog', 'boss_panel',
+                   'join_list', 'join_preview')
+
     def _zoom_failed(self):
-        """Зум не привёлся. Копим неудачи ПОДРЯД, а не останавливаемся сразу:
-        разовая осечка бывает штатно (анимация не доехала, поверх кадра
-        всплыл баннер). Но и работать на чужом зуме нельзя — детекция
+        """Зум не привёлся. Что делать — зависит от ПРИЧИНЫ.
+
+        «Щипок не двигает карту» — поломка: копим неудачи подряд и зовём
+        человека, как раньше. Работать на чужом зуме нельзя: детекция
         площадей врёт, и бот тапал бы мимо целей.
 
+        «Экран не опознан» — чаще временная помеха. Живьём (прогон 3,
+        2026-08-13) всплывший баннер прогресса закрыл якорь HUD энергии
+        (скор 0.364 при пороге 0.7), и бот встал за ШЕСТЬ секунд с «нужен
+        человек», хотя баннер уходит сам. Такие ждём дольше и отдельным
+        счётчиком — той же политикой, что у сторожа: ждать без единого тапа.
+
+        Исключение — СВОЯ модалка (превью, окно энергии, меню режима):
+        ожиданием она не уйдёт, её закрывают. Это не провал зума, иначе три
+        всплывших окна подряд выключали бы бота.
+
         Возвращает None (ждём и пробуем снова) или Action('stop')."""
+        if getattr(self.zoom, 'last_failure', 'stuck') == 'unknown_screen':
+            screen = self.vision.classify_screen(self.driver.screenshot())
+            if screen in self._OWN_MODALS:
+                self.log(f"  поверх карты открыт «{screen}» — закрываю и пробую снова")
+                self.actions.close_preview()
+                self.human.after_tap(0.6)
+                return None
+            self._zoom_unknowns += 1
+            if self._zoom_unknowns >= self.cfg.zoom_unknown_limit:
+                self.log(f"Экран не опознан {self._zoom_unknowns} раз подряд — "
+                         f"стоп, нужен человек.")
+                return Action('stop')
+            self.log(f"  экран не опознан ({self._zoom_unknowns}/"
+                     f"{self.cfg.zoom_unknown_limit}) — жду, помеха может уйти сама")
+            self.sleep(self.human.idle_s(self.cfg.zoom_unknown_wait_s))
+            return None
+
         self._zoom_fails += 1
         if self._zoom_fails >= self.cfg.zoom_fail_limit:
             self.log(f"Зум не приводится {self._zoom_fails} раз подряд — стоп, нужен человек.")

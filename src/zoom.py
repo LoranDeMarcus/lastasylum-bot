@@ -30,21 +30,31 @@ class ZoomKeeper:
         # cancel всегда объект, а не None: точки проверки читаются
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
+        # Почему последний ensure отдал False. Снаружи «экран не опознан» и
+        # «щипок не двигает карту» требуют РАЗНОГО ответа: первое пережидают,
+        # второе — повод звать человека.
+        self.last_failure = None
 
     def ensure(self, want):
         """Привести карту к ступени want. True — получилось.
 
-        False отдаём в двух случаях, и оба означают «дальше вслепую нельзя»:
-        экран не опознан (под нами может быть меню, а не карта) или щипок
-        перестал двигать карту."""
+        False отдаём в трёх случаях, и все означают «дальше вслепую нельзя»;
+        какой именно — в self.last_failure:
+        'cancelled'      — нажат Стоп;
+        'unknown_screen' — экран не опознан (под нами может быть меню, а
+                           может баннер поверх карты — это ПЕРЕЖИДАЮТ);
+        'stuck'          — щипок перестал двигать карту."""
+        self.last_failure = None
         for _ in range(max(1, self.cfg.zoom_fail_limit)):
             if self.cancel.stopped():
+                self.last_failure = 'cancelled'
                 return False
             have = self.vision.map_zoom(self.driver.screenshot())
             if have == want:
                 return True
             if have == 'unknown':
                 self.log(f"  зум: экран не опознан — щипать вслепую не буду")
+                self.last_failure = 'unknown_screen'
                 return False
             self.log(f"  зум: {have} -> {want}, щипок")
             if self.LADDER.index(have) < self.LADDER.index(want):
@@ -54,4 +64,5 @@ class ZoomKeeper:
             self.human.after_tap(self.cfg.pinch_settle_s)   # карте нужно доехать анимацией
         self.log(f"  зум: не удалось привести к '{want}' за "
                  f"{self.cfg.zoom_fail_limit} щипков")
+        self.last_failure = 'stuck'
         return False

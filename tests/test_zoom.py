@@ -27,6 +27,10 @@ class FakeVision:
     def map_zoom(self, img):
         return img                 # кадр и есть уровень
 
+class UnknownVision:
+    def map_zoom(self, img):
+        return "unknown"
+
 def _cfg():
     cfg = Config()
     cfg.human_enabled = False      # без случайных пауз тест детерминирован
@@ -122,3 +126,29 @@ def test_gives_up_after_fail_limit():
     d = Stuck("close")
     assert _keeper(d, cfg).ensure("skull") is False
     assert len(d.pinches) == 2
+
+def test_ensure_reports_unknown_screen():
+    """«Экран не опознан» и «щипок не работает» — разные беды: первую надо
+    переждать (баннер уходит сам), вторая требует человека. Снаружи их не
+    различить, если ensure молча отдаёт False."""
+    d = FakeDriver("close")
+    k = ZoomKeeper(d, UnknownVision(), _cfg(), log=lambda m: None, sleep=lambda s: None)
+    assert k.ensure("skull") is False
+    assert k.last_failure == "unknown_screen"
+    assert d.pinches == []          # вслепую не щипали
+
+def test_ensure_reports_stuck_pinch():
+    """Экран опознан, но щипок не двигает карту — это поломка."""
+    class StuckDriver(FakeDriver):
+        def zoom_out(self):
+            self.pinches.append("out")      # карта не двигается
+    d = StuckDriver("close")
+    k = ZoomKeeper(d, FakeVision(), _cfg(), log=lambda m: None, sleep=lambda s: None)
+    assert k.ensure("skull") is False
+    assert k.last_failure == "stuck"
+
+def test_ensure_clears_failure_on_success():
+    d = FakeDriver("close")
+    k = ZoomKeeper(d, FakeVision(), _cfg(), log=lambda m: None, sleep=lambda s: None)
+    assert k.ensure("skull") is True
+    assert k.last_failure is None
