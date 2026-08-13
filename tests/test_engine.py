@@ -772,6 +772,36 @@ def test_own_modal_is_closed_instead_of_waited_out():
     assert eng._zoom_fails == 0
     assert eng._zoom_unknowns == 0
 
+class StuckModalVision(ThiefFakeVision):
+    """Модалка НЕ закрывается: тап close_preview либо промахивается, либо
+    игра зависла — classify_screen раз за разом называет ту же СВОЮ
+    модалку. Ревью раунда 1 (Critical): без предела попыток бот молча
+    крутится вечно, а сторож это не ловит — экран РАСПОЗНАН, просто не тот."""
+    def __init__(self):
+        super().__init__(squad="idle", leveled=[])
+    def map_zoom(self, img):
+        return "unknown"
+    def classify_screen(self, img):
+        return "thief_preview"
+
+class CountingActions:
+    """close_preview тапает раз за разом, но экран не откликается."""
+    def __init__(self):
+        self.closed = 0
+    def close_preview(self):
+        self.closed += 1
+
+def test_unclosable_modal_eventually_stops():
+    """У попыток закрыть СВОЮ модалку тоже есть предел: закрытие либо
+    срабатывает сразу, либо не сработает вовсе (не помеха, которую
+    пережидают) — вечно тапать по тому же месту нельзя."""
+    v = StuckModalVision()
+    acts = CountingActions()
+    eng = _zoom_engine(v, FakeZoom(ok=False, last_failure='unknown_screen'),
+                       actions=acts, cfg=_thief_cfg(modal_close_limit=3))
+    actions = [eng.one_iteration() for _ in range(10)]
+    assert any(a is not None and a.type == 'stop' for a in actions)
+
 def test_thief_sleeps_until_next_wave():
     """Таймер волны 666 с -> спим столько, а не жмём «Поиск» вхолостую."""
     v = ThiefFakeVision(leveled=[])

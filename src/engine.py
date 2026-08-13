@@ -44,6 +44,10 @@ class BotEngine:
         # неопознанный экран считаем ОТДЕЛЬНО от сломанного щипка: у них
         # разные лечения (переждать против «позвать человека») и разный запас
         self._zoom_unknowns = 0
+        # подряд попыток закрыть СВОЮ модалку тапом: закрытие либо срабатывает
+        # сразу, либо не сработает вовсе (тап мимо, игра зависла) — без
+        # предела бот крутится вечно, а сторож это не ловит (экран распознан)
+        self._modal_closes = 0
         self._searches = 0          # «Поисков» подряд без набора целей
         # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
         # а не раннер: подтверждение видно только здесь, а «dispatched» от
@@ -308,6 +312,7 @@ class BotEngine:
         # вечно щипал бы туда-сюда молча вместо честной остановки.
         self._zoom_fails = 0
         self._zoom_unknowns = 0
+        self._modal_closes = 0
         img = self.driver.screenshot()
         energy = self.vision.read_energy(img)
         targets = [t for t in self.vision.leveled_targets(img)
@@ -437,10 +442,21 @@ class BotEngine:
         ожиданием она не уйдёт, её закрывают. Это не провал зума, иначе три
         всплывших окна подряд выключали бы бота.
 
+        У закрытия модалки СВОЙ предел (Critical, ревью раунда 1): без него
+        промахнувшийся тап или зависшая игра держат бота в вечном `None`, а
+        сторож это не ловит — экран распознан, просто это не карта. Предел
+        маленький: закрытие либо срабатывает сразу, либо не сработает вовсе,
+        это не помеха, которую пережидают.
+
         Возвращает None (ждём и пробуем снова) или Action('stop')."""
         if getattr(self.zoom, 'last_failure', 'stuck') == 'unknown_screen':
             screen = self.vision.classify_screen(self.driver.screenshot())
             if screen in self._OWN_MODALS:
+                self._modal_closes += 1
+                if self._modal_closes >= self.cfg.modal_close_limit:
+                    self.log(f"«{screen}» не закрывается {self._modal_closes} раз "
+                             f"подряд — стоп, нужен человек.")
+                    return Action('stop')
                 self.log(f"  поверх карты открыт «{screen}» — закрываю и пробую снова")
                 self.actions.close_preview()
                 self.human.after_tap(0.6)
