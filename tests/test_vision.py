@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import cv2
+import pytest
 from config import Config
 from src.numbers import FixedReader, TemplateReader
 from src.vision import Vision
@@ -737,3 +738,30 @@ def test_classify_screen_knows_thief_screens():
     cfg, v = _thief_vision()
     assert v.classify_screen(cv2.imread("reference/43_thief_tab.png")) == "thief_tab"
     assert v.classify_screen(cv2.imread("reference/45_thief_preview.png")) == "thief_preview"
+
+FIXTURES = os.path.join("tests", "fixtures")
+
+def _fixture(name):
+    path = os.path.join(FIXTURES, name)
+    if not os.path.exists(path):
+        pytest.skip(f"нет кадра {path} — сними зондом tools/probe_squad_cards.py")
+    return cv2.imread(path)
+
+@pytest.mark.parametrize("frame,expected", [
+    ("preview_squad_busy.png", "busy"),
+    ("preview_squad_returning.png", "returning"),
+    ("preview_squad_idle.png", "idle"),
+])
+def test_preview_squad_state_reads_the_card(frame, expected):
+    """Состояние отряда читается ПРЯМО В ПРЕВЬЮ: верхний виджет «Отряд»
+    превью перекрывает, а конвейеру нужно знать, освободился ли отряд, не
+    выходя из превью."""
+    v = Vision(Config(), TemplateReader(Config()))
+    assert v.preview_squad_state(_fixture(frame), 2) == expected
+
+def test_preview_squad_state_is_none_off_preview():
+    """На карте карточек нет — примитив обязан честно сказать «не знаю»,
+    а вызывающий код трактует это как «занят» и лишний раз подождёт."""
+    v = Vision(Config(), TemplateReader(Config()))
+    blank = np.zeros((1920, 1080, 3), np.uint8)
+    assert v.preview_squad_state(blank, 2) is None

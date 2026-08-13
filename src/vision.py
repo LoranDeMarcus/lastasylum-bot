@@ -463,6 +463,37 @@ class Vision:
             return 'idle'
         return 'returning' if sr >= sm else 'marching'
 
+    # значок состояния на карточке -> ответ примитива
+    _CARD_MARKS = (('busy', 'squad_card_busy'),
+                   ('returning', 'squad_card_returning'),
+                   ('idle', 'squad_idle'))
+
+    def preview_squad_state(self, img, slot):
+        """Состояние отряда slot по его карточке в превью отправки.
+
+        'idle' | 'returning' | 'busy' | None (карточка не опознана).
+
+        Читаем в превью, а НЕ в верхнем виджете «Отряд»: превью его
+        перекрывает, а конвейеру нужно узнать об освобождении отряда, не
+        выходя из превью — ради этого он и существует.
+
+        Значок ищем шаблоном ВНУТРИ бокса карточки, а не по абсолютной
+        координате: тот же приём, что спас строку склянки. Бокс берётся от
+        cfg.squad_slots, потому что замер показал совпадение координат
+        карточек превью с уже откалиброванными слотами."""
+        cx, cy = self.squad_slot(slot)
+        w, h = self.cfg.squad_card_size
+        x0, y0 = max(0, cx - w // 2), max(0, cy - h // 2)
+        crop = img[y0:y0 + h, x0:x0 + w]
+        if crop.size == 0:
+            return None
+        best, score = None, 0.0
+        for name, tpl in self._CARD_MARKS:
+            s = self._match_state(crop, tpl)
+            if s > score:
+                best, score = name, s
+        return best if score >= self.cfg.squad_card_threshold else None
+
     def active_squads(self, img):
         """Число активных отрядов из виджета «Отряд N/4» (левый верх) —
         главный гейт режима «Элитная скверна»: N < squad_total = есть куда слать.

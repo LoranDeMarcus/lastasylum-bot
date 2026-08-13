@@ -27,6 +27,10 @@ class FakeVision:
     def map_zoom(self, img):
         return img                 # кадр и есть уровень
 
+class UnknownVision:
+    def map_zoom(self, img):
+        return "unknown"
+
 def _cfg():
     cfg = Config()
     cfg.human_enabled = False      # без случайных пауз тест детерминирован
@@ -82,6 +86,38 @@ def test_stop_before_pinch_blocks_action():
     assert keeper.ensure("skull") is False
     assert d.pinches == []
 
+class FakeHuman:
+    """Спай вместо настоящего Human: реальный after_tap растягивает базовую
+    паузу случайным множителем (delay_settle_mult) и добавляет реакцию
+    (delay_react >= 0.25 с) — точное значение cfg.pinch_settle_s в
+    засечённой паузе никогда не увидеть, минимум для 2.0 с уже 2.25 с.
+    Поэтому проверяем, ЧТО ZoomKeeper передаёт в after_tap, а не как
+    Human это потом растянет — это уже забота теста самого Human."""
+    def __init__(self):
+        self.after_tap_calls = []
+
+    def after_tap(self, base_s):
+        self.after_tap_calls.append(base_s)
+
+def test_settle_pause_comes_from_config():
+    """Пауза после жеста — настройка: с 8 шагами жест короче, и карта
+    доезжает анимацией уже ПОСЛЕ возврата управления.
+
+    Значение НАМЕРЕННО отличается от дефолта cfg.pinch_settle_s (2.0, см.
+    config.py) — тем же приёмом, что и test_gives_up_after_fail_limit ниже:
+    при совпадении со значением по умолчанию тест не отличил бы код,
+    читающий паузу из конфига, от кода с захардкоженной константой 2.0 —
+    обе версии остались бы зелёными (проверено мутацией: after_tap(2.0)
+    вместо after_tap(self.cfg.pinch_settle_s) тест не ронял)."""
+    cfg = _cfg()
+    cfg.pinch_settle_s = 3.7
+    human = FakeHuman()
+    d = FakeDriver("close")
+    k = ZoomKeeper(d, FakeVision(), cfg, log=lambda m: None, sleep=lambda s: None,
+                   human=human)
+    assert k.ensure("skull") is True
+    assert 3.7 in human.after_tap_calls
+
 def test_gives_up_after_fail_limit():
     """Щипок не двигает карту -> не долбимся вечно.
 
@@ -97,3 +133,29 @@ def test_gives_up_after_fail_limit():
     d = Stuck("close")
     assert _keeper(d, cfg).ensure("skull") is False
     assert len(d.pinches) == 2
+
+def test_ensure_reports_unknown_screen():
+    """«Экран не опознан» и «щипок не работает» — разные беды: первую надо
+    переждать (баннер уходит сам), вторая требует человека. Снаружи их не
+    различить, если ensure молча отдаёт False."""
+    d = FakeDriver("close")
+    k = ZoomKeeper(d, UnknownVision(), _cfg(), log=lambda m: None, sleep=lambda s: None)
+    assert k.ensure("skull") is False
+    assert k.last_failure == "unknown_screen"
+    assert d.pinches == []          # вслепую не щипали
+
+def test_ensure_reports_stuck_pinch():
+    """Экран опознан, но щипок не двигает карту — это поломка."""
+    class StuckDriver(FakeDriver):
+        def zoom_out(self):
+            self.pinches.append("out")      # карта не двигается
+    d = StuckDriver("close")
+    k = ZoomKeeper(d, FakeVision(), _cfg(), log=lambda m: None, sleep=lambda s: None)
+    assert k.ensure("skull") is False
+    assert k.last_failure == "stuck"
+
+def test_ensure_clears_failure_on_success():
+    d = FakeDriver("close")
+    k = ZoomKeeper(d, FakeVision(), _cfg(), log=lambda m: None, sleep=lambda s: None)
+    assert k.ensure("skull") is True
+    assert k.last_failure is None

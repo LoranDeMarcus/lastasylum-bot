@@ -554,16 +554,28 @@ class ThiefFakeDriver:
 class ThiefFakeVision:
     """Кадр один, ответы фиксированы: движок тут проверяется на решения,
     а не на распознавание — оно своё в tests/test_vision.py."""
-    def __init__(self, squad="idle", leveled=(), energy=120):
+    def __init__(self, squad="idle", leveled=(), energy=120, energy_after=None):
         self.squad = squad
         self.leveled = list(leveled)
         self.energy = energy
+        # Что вернёт read_energy НАЧИНАЯ со второго чтения (подтверждение
+        # отправки читает энергию ещё раз ПОСЛЕ удара, см.
+        # BotEngine._dispatch_confirmed) — тот же приём, что у
+        # FakeVision._active_after для join/скверны. None -> энергия не
+        # меняется на протяжении вызовов, как было раньше.
+        self.energy_after = energy_after
+        self.energy_reads = 0
     def squad_state(self, img):
         return self.squad
     def leveled_targets(self, img):
         return self.leveled
     def read_energy(self, img):
+        self.energy_reads += 1
+        if self.energy_reads > 1 and self.energy_after is not None:
+            return self.energy_after
         return self.energy
+    def classify_screen(self, img):
+        return "world_map"          # по умолчанию помех поверх карты нет
 
 class ThiefFakeActions:
     def close_preview(self):
@@ -591,10 +603,25 @@ class FakeThief:
                 self.last_flask_stock = self._stock
                 self._stock -= self._spend
         return self.attack_result
+    # Конвейер зовёт arm() после КАЖДОЙ обычной отправки (не только из
+    # взведённого состояния) — _arm_next() в движке. Тесты этого файла,
+    # писавшиеся до задачи 7, про конвейер ничего не знают и заведомо не
+    # взводят свой FakeThief; 'failed' держит _arm_next() тихим (ветка
+    # «взвод не удался» в движке), чтобы _armed не включался у них исподтишка
+    # и старые проверки остались верны без единой правки. Тесты САМОГО
+    # конвейера используют ArmingThief (см. ниже), который эти методы
+    # переопределяет целиком.
+    def arm(self, target):
+        self.calls.append(("arm", target.x, target.y))
+        return "failed"
+    def fire(self, refill=False):
+        self.calls.append(("fire", refill))
+        return "failed"
 
 class FakeZoom:
-    def __init__(self, ok=True):
+    def __init__(self, ok=True, last_failure='stuck'):
         self.ok = ok
+        self.last_failure = None if ok else last_failure
         self.calls = []
     def ensure(self, want):
         self.calls.append(want)
@@ -645,6 +672,22 @@ def test_thief_searches_when_too_few_targets():
     eng.one_iteration()
     assert t.calls == ["search"]
 
+def test_production_config_attacks_a_single_visible_thief():
+    """Порог берётся из ПРОИЗВОДСТВЕННОГО конфига, а не из хелпера.
+
+    Живьём (прогон 2, итерация 24) бот видел двух воров, одного ровно в
+    центре, и всё равно уходил в меню за «Поиском» — заход стоит 21-24 с.
+    Хелпер _thief_cfg ставит порог 1 сам, поэтому дефолт 3 не проверялся."""
+    cfg = Config()
+    cfg.strategy = "thief"
+    cfg.human_enabled = False
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)])
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t, cfg=cfg)
+    eng.one_iteration()
+    assert "search" not in t.calls
+    assert ("attack", 540, 900, True) in t.calls
+
 def test_thief_attacks_anyway_after_search_budget_spent():
     """Редкая волна не должна давать вечный цикл «ищу — мало — ищу» при
     живой цели перед носом."""
@@ -676,6 +719,112 @@ def test_thief_stops_when_zoom_unfixable():
     actions = [eng.one_iteration() for _ in range(eng.cfg.zoom_fail_limit)]
     assert actions[0] is None
     assert actions[-1].type == "stop"
+
+class BannerVision(ThiefFakeVision):
+    """Баннер закрыл якорь HUD: экран не опознан, зума не определить."""
+    def __init__(self):
+        super().__init__(squad="idle", leveled=[])
+    def map_zoom(self, img):
+        return "unknown"
+    def classify_screen(self, img):
+        return "unknown"
+
+class ModalVision(ThiefFakeVision):
+    """Поверх карты осталось СВОЁ превью: ожиданием не лечится, надо закрыть."""
+    def __init__(self):
+        super().__init__(squad="idle", leveled=[])
+        self.closed = False
+    def map_zoom(self, img):
+        return "close" if self.closed else "unknown"
+    def classify_screen(self, img):
+        return "game_view" if self.closed else "thief_preview"
+
+class ClosingActions:
+    def __init__(self, vision):
+        self.vision = vision
+        self.closed = 0
+    def close_preview(self):
+        self.closed += 1
+        self.vision.closed = True
+
+def _zoom_engine(vision, zoom, actions=None, cfg=None, sleeps=None):
+    eng = BotEngine(ThiefFakeDriver(), vision, actions or ThiefFakeActions(),
+                    cfg or _thief_cfg(), log=lambda m: None,
+                    sleep=(sleeps.append if sleeps is not None else (lambda s: None)),
+                    thief=FakeThief(), zoom=zoom)
+    eng.flasks = 500
+    return eng
+
+def test_unrecognized_screen_is_waited_out_not_counted_as_broken_zoom():
+    """Живьём бот встал за 6 с из-за баннера, закрывшего якорь HUD (замер:
+    скор 0.364 при пороге 0.7). Баннер уходит сам — его надо пережидать, а
+    не звать человека."""
+    sleeps = []
+    eng = _zoom_engine(BannerVision(),
+                       FakeZoom(ok=False, last_failure='unknown_screen'),
+                       sleeps=sleeps)
+    for _ in range(Config().zoom_fail_limit):
+        assert eng.one_iteration() is None          # ни одного стопа
+    assert eng._zoom_fails == 0                     # это НЕ провал зума
+    assert max(sleeps) >= Config().zoom_unknown_wait_s
+
+def test_unrecognized_screen_eventually_gives_up():
+    """Но и ждать вечно нельзя: терпение конечно, просто оно длиннее."""
+    cfg = _thief_cfg(zoom_unknown_limit=2)
+    eng = _zoom_engine(BannerVision(),
+                       FakeZoom(ok=False, last_failure='unknown_screen'), cfg=cfg)
+    assert eng.one_iteration() is None
+    assert eng.one_iteration().type == 'stop'
+
+def test_stuck_pinch_still_stops_after_the_old_limit():
+    """Сломанный щипок — прежнее поведение, терпение тут ни при чём."""
+    eng = _zoom_engine(ThiefFakeVision(squad="idle", leveled=[]),
+                       FakeZoom(ok=False, last_failure='stuck'))
+    for _ in range(Config().zoom_fail_limit - 1):
+        assert eng.one_iteration() is None
+    assert eng.one_iteration().type == 'stop'
+
+def test_own_modal_is_closed_instead_of_waited_out():
+    """Своё превью ожиданием не уйдёт — его закрывают. И это не провал зума:
+    иначе три всплывших окна подряд выключали бы бота."""
+    v = ModalVision()
+    acts = ClosingActions(v)
+    eng = _zoom_engine(v, FakeZoom(ok=False, last_failure='unknown_screen'),
+                       actions=acts)
+    assert eng.one_iteration() is None
+    assert acts.closed == 1
+    assert eng._zoom_fails == 0
+    assert eng._zoom_unknowns == 0
+
+class StuckModalVision(ThiefFakeVision):
+    """Модалка НЕ закрывается: тап close_preview либо промахивается, либо
+    игра зависла — classify_screen раз за разом называет ту же СВОЮ
+    модалку. Ревью раунда 1 (Critical): без предела попыток бот молча
+    крутится вечно, а сторож это не ловит — экран РАСПОЗНАН, просто не тот."""
+    def __init__(self):
+        super().__init__(squad="idle", leveled=[])
+    def map_zoom(self, img):
+        return "unknown"
+    def classify_screen(self, img):
+        return "thief_preview"
+
+class CountingActions:
+    """close_preview тапает раз за разом, но экран не откликается."""
+    def __init__(self):
+        self.closed = 0
+    def close_preview(self):
+        self.closed += 1
+
+def test_unclosable_modal_eventually_stops():
+    """У попыток закрыть СВОЮ модалку тоже есть предел: закрытие либо
+    срабатывает сразу, либо не сработает вовсе (не помеха, которую
+    пережидают) — вечно тапать по тому же месту нельзя."""
+    v = StuckModalVision()
+    acts = CountingActions()
+    eng = _zoom_engine(v, FakeZoom(ok=False, last_failure='unknown_screen'),
+                       actions=acts, cfg=_thief_cfg(modal_close_limit=3))
+    actions = [eng.one_iteration() for _ in range(10)]
+    assert any(a is not None and a.type == 'stop' for a in actions)
 
 def test_thief_sleeps_until_next_wave():
     """Таймер волны 666 с -> спим столько, а не жмём «Поиск» вхолостую."""
@@ -871,3 +1020,349 @@ def test_thief_prefers_read_stock_over_local_count():
     eng = _thief_engine(v, thief=t)          # локальный учёт (500) был бы неверен
     eng.one_iteration()
     assert eng.flasks == 273
+
+# --- Конвейер: готовим следующего вора, пока отряд в марше ---
+
+class ArmingThief(FakeThief):
+    """Взвод и отправка раздельно — как в ThiefActions после задачи 6."""
+    def __init__(self, arm_result="armed", fire_result="dispatched", spend=0, stock=None):
+        super().__init__(spend=spend, stock=stock)
+        self.arm_result = arm_result
+        self.fire_result = fire_result
+    def arm(self, target):
+        self.calls.append(("arm", target.x, target.y))
+        return self.arm_result
+    def fire(self, refill=False):
+        self.calls.append(("fire", refill))
+        # Раунд исправления 2: та же имитация рефилла, что у FakeThief.attack
+        # (self._spend/self._stock из базового __init__) — нужна, чтобы
+        # тесты могли изобразить настоящий рефилл склянкой в fire().
+        if refill:
+            self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+                self._stock -= self._spend
+        return self.fire_result
+
+class PreviewVision(ThiefFakeVision):
+    """В превью карточка отряда 2 отдаёт заранее заданную череду состояний."""
+    def __init__(self, states, screen="thief_preview", **kw):
+        super().__init__(**kw)
+        self._states = list(states)
+        self._screen = screen
+    def classify_screen(self, img):
+        return self._screen
+    def preview_squad_state(self, img, slot):
+        return self._states.pop(0) if self._states else "idle"
+
+def test_after_dispatch_engine_arms_the_next_thief():
+    """Смысл конвейера: подготовка следующей цели уходит ПОД марш.
+
+    energy_after=100 (< 120-5) — отправка ПОДТВЕРЖДЕНА, иначе _arm_next()
+    не позвался бы вовсе (см. _dispatch_confirmed, раунд исправления 1)."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900),
+                                 Target("mob", 5, 300, 700)],
+                        energy=120, energy_after=100)
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert any(c[0] == "arm" for c in t.calls)
+    assert eng._armed is True
+
+def test_armed_engine_waits_while_squad_is_busy():
+    """Пока на карточке мечи — «Отправиться» не жмём: живьём такой тап
+    ничего не отправляет, только закрывает превью (замер 2026-08-13)."""
+    v = PreviewVision(["busy"])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    assert eng.one_iteration() is None
+    assert not any(c[0] == "fire" for c in t.calls)
+
+def test_armed_engine_fires_on_returning():
+    """Жёлтая стрелка возврата — сигнал к отправке (решение пользователя):
+    отряд перенаправляется, не доходя до базы."""
+    v = PreviewVision(["returning"])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng.one_iteration()
+    assert ("fire", True) in t.calls
+    assert eng._armed is False
+
+def test_armed_engine_gives_up_after_poll_limit():
+    """Вора могли увести. Вечно сидеть в превью нельзя — закрываем и
+    возвращаемся в обычный цикл."""
+    v = PreviewVision(["busy"] * 5)
+    t = ArmingThief()
+    acts = ClosingActions(v)
+    eng = BotEngine(ThiefFakeDriver(), v, acts,
+                    _thief_cfg(armed_poll_limit=2), log=lambda m: None,
+                    sleep=lambda s: None, thief=t, zoom=FakeZoom())
+    eng.flasks = 500
+    eng._armed = True
+    eng.one_iteration()
+    eng.one_iteration()
+    assert eng._armed is False
+    assert acts.closed == 1
+
+def test_armed_engine_drops_the_arm_if_preview_vanished():
+    """Превью закрылось само — это не поломка, просто взвод снят."""
+    v = PreviewVision(["idle"], screen="world_map")
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng.one_iteration()
+    assert eng._armed is False
+    assert not any(c[0] == "fire" for c in t.calls)
+
+# --- Финальное ревью перед слиянием thief-speedup: 4 правки ---
+
+def test_armed_engine_accepts_low_energy_preview_and_fires():
+    """Important: превью «Увеличить энергию» (reference/26_preview_low_energy.png)
+    classify_screen различает от 'thief_preview' — это тот же взведённый
+    экран, просто игра нашла, что энергии не хватает. Раньше движок требовал
+    РОВНО 'thief_preview' и на этом варианте снимал взвод, теряя
+    подготовленный такт (~18 с) при каждом рефилле (раз в 10 отправок,
+    проверено на живой игре). fire() сам уйдёт в ветку _low_energy(refill) —
+    конвейеру достаточно не спутать эту помеху с настоящим закрытием."""
+    v = PreviewVision(["idle"], screen="preview_low_energy")
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 8
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._armed is False
+    assert ("fire", True) in t.calls
+
+def test_armed_engine_waits_while_squad_card_unrecognized():
+    """Critical: карточку не опознали (None) — трактуем как «занят», а не
+    как «свободен». Отправка вслепую стоила бы 10 энергии. Мутация
+    `if state in (None, 'busy')` -> `if state == 'busy'` не роняла ни
+    одного теста до этой правки — эта проверка её ловит."""
+    v = PreviewVision([None])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    assert eng.one_iteration() is None
+    assert not any(c[0] == "fire" for c in t.calls)
+    assert eng._armed is True
+
+def test_armed_engine_respects_send_next_on_return_flag():
+    """Important: cfg.send_next_on_return молча не работал в конвейерном
+    пути — обычный путь спрашивает self._squad_ready(state), а конвейер
+    слал по 'returning' безусловно. Флаг обязан действовать в обоих."""
+    v = PreviewVision(["returning"])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t, cfg=_thief_cfg(send_next_on_return=False))
+    eng._armed = True
+    assert eng.one_iteration() is None
+    assert not any(c[0] == "fire" for c in t.calls)
+    assert eng._armed is True
+
+# --- Раунд исправления 1: подтверждение отправки по энергии. Живой прогон
+# 2026-08-13 поймал заход 79->79, отрапортованный игрой как 'dispatched',
+# хотя энергия не потратилась ни на йоту — движок обнулил _no_progress
+# впустую. Гипотеза «взвели того же вора, к которому уже идёт отряд» НЕ
+# подтвердилась проверкой по координатам (240 px от центра у холостого
+# случая против 194 и 464 px у успешных) — чинится сам факт, а не
+# предполагаемый механизм. ---
+
+def test_armed_engine_confirms_dispatch_by_energy_drop():
+    """Энергия упала на 10 (реальная цена удара, замер спеки) -> отправка
+    засчитана, _no_progress обнулён (живой прогон: 98->88)."""
+    v = PreviewVision(["returning"], energy=88)     # единственное чтение — «после»
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 98
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+
+def test_armed_engine_rejects_dispatch_without_energy_drop():
+    """Энергия не изменилась (79->79, живой прогон 2026-08-13) -> НЕ
+    прогресс: _no_progress растёт, цель уходит в skip_targets, чтобы
+    следующий взвод не взял её снова. И конвейер не взводит следующую цель
+    вхолостую (раунд исправления 2, недостающая проверка).
+
+    Раунд исправления 3: `leveled` обязан содержать ВТОРУЮ, доступную цель
+    (300,700 — дальше от центра 540,960, поэтому выбор первой цели не
+    меняется). Без неё `_arm_next()`, даже если бы движок ошибочно его
+    позвал, вышел бы на `if not targets: return` раньше вызова `thief.arm()`
+    (единственная цель в кадре — та же самая, только что помеченная
+    непроходимой) — и `assert not any(c[0] == "arm" ...)` был бы верен
+    ЛЮБОЙ ценой, тест не различал бы поломку. Ревьюер проверил принудительным
+    вызовом `eng._arm_next()` сразу после итерации: без второй цели
+    `"arm"` не появляется в `t.calls` НИ ПРИ КАКОМ поведении движка."""
+    v = PreviewVision(["returning"], energy=79,
+                      leveled=[Target("mob", 5, 300, 700)])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 79
+    target = Target("mob", 5, 540, 900)
+    eng._armed_target = target
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
+
+def test_armed_engine_stops_after_repeated_unconfirmed_dispatches():
+    """Три неподтверждённые отправки подряд — стоп и зов человека, тот же
+    предел, что у соседних ветвей провала (max_search_failures)."""
+    v = PreviewVision(["returning"] * 5, energy=79)
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    target = Target("mob", 5, 540, 900)
+    last = None
+    for _ in range(eng.cfg.max_search_failures):
+        eng._armed = True
+        eng._armed_energy_before = 79
+        eng._armed_target = target
+        last = eng.one_iteration()
+    assert last is not None and last.type == 'stop'
+
+def test_armed_engine_treats_unreadable_energy_as_success_but_logs_it():
+    """Энергию прочитать можно не всегда -> ложная тревога дороже
+    пропуска: отправка считается успешной, но лог не молчит об этом."""
+    v = PreviewVision(["returning"], energy=None)
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 98
+    eng._armed_target = Target("mob", 5, 540, 900)
+    lines = []
+    eng.log = lines.append
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert any("подтвердить не могу" in s for s in lines)
+
+def test_thief_normal_path_confirms_dispatch_by_energy_drop():
+    """Обычный (неконвейерный) путь ведёт себя так же, как взведённый:
+    энергия упала — отправка засчитана."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900)],
+                        energy=98, energy_after=88)
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+
+def test_thief_normal_path_rejects_dispatch_without_energy_drop():
+    """И тот же гейт в обычном пути: энергия не упала — НЕ прогресс, цель
+    уходит в skip_targets, конвейер не взводится вхолостую. Одна проверка
+    на оба пути, как и требовалось (см. _dispatch_confirmed).
+
+    Раунд исправления 3: без ВТОРОЙ цели (300,700 — дальше от центра,
+    выбор первой не меняется) единственная цель в `leveled` — это та же
+    самая (540,900), которую неподтверждённая отправка только что положила
+    в `skip_targets`, и она же там и отфильтровывается фильтром `leveled`
+    в `_arm_next()`. Тест не различал бы поломку «движок ошибочно позвал
+    _arm_next()» — со второй целью различает (проверено ревьюером
+    принудительным вызовом `eng._arm_next()`: без второй цели `"arm"` не
+    появляется ни при какой поломке)."""
+    target = Target("mob", 5, 540, 900)
+    v = ThiefFakeVision(leveled=[target, Target("mob", 5, 300, 700)],
+                        energy=79, energy_after=79)
+    t = FakeThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
+
+# --- Раунд исправления 2 (Important, перепроверка): рефилл склянкой тратит
+# +50/+100 энергии и сразу отправляет — заход НАСТОЯЩИЙ, но энергия ПОСЛЕ
+# него ВЫШЕ, чем до, и голое сравнение чисел объявило бы его холостым. ---
+
+def test_armed_engine_treats_flask_refill_as_confirmed_despite_energy_rise():
+    """Рефилл (склянка потрачена ЗА ЭТОТ заход, flasks_used вырос) — судить
+    по энергии нельзя вовсе: реальный живой случай, где энергия ВЫРОСЛА
+    (8 -> 58) после честной отправки.
+
+    Раунд исправления 3, «помельче»: закрепляю флаг короткого замыкания,
+    а не только его следствие. `v.energy_reads == 1` — единственное чтение
+    энергии за итерацию идёт из СЛЕДУЮЩЕГО _arm_next() (взвод следующей
+    цели), а не из _dispatch_confirmed: значит flask_spent сработал ДО
+    какого-либо чтения энергии. Мутация «flask_spent всегда False»
+    (проводка раунда 2 как бы удалена) дала бы energy_reads == 2 и всё
+    равно прошла бы по одной ветке роста энергии — эта проверка её ловит."""
+    v = PreviewVision(["returning"], energy=58)
+    t = ArmingThief(spend=2)          # fire(refill=True) «тратит» склянку
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 8
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert eng.skip_targets == set()
+    assert v.energy_reads == 1
+
+def test_armed_engine_treats_energy_rise_as_confirmed_even_without_tracked_spend():
+    """Симметричный случай (независимый от учёта склянок): энергия ВЫРОСЛА
+    сама по себе (8 -> 58) — тоже верный признак рефилла, даже если по
+    какой-то причине flasks_used его не отразил (spend=0 по умолчанию)."""
+    v = PreviewVision(["returning"], energy=58)
+    t = ArmingThief()                 # spend=0 — flasks_used НЕ растёт
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 8
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert eng.skip_targets == set()
+
+def test_thief_normal_path_treats_flask_refill_as_confirmed_despite_energy_rise():
+    """И в обычном пути: рефилл (spend>0) — не повод объявлять отправку
+    холостой, даже если энергия выросла.
+
+    Раунд исправления 3: `v.energy_reads == 2` (чтение ДО удара + чтение
+    внутри последующего _arm_next()) закрепляет, что flask_spent
+    короткозамкнул _dispatch_confirmed — БЕЗ этой ветки было бы 3 чтения
+    (добавилось бы ещё одно внутри самого _dispatch_confirmed)."""
+    target = Target("mob", 5, 540, 900)
+    v = ThiefFakeVision(leveled=[target], energy=8, energy_after=58)
+    t = FakeThief(spend=2)
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert eng.skip_targets == set()
+    assert v.energy_reads == 2
+
+# --- Раунд исправления 3 (Important, перепроверка): симметричная защита
+# «энергия выросла -> рефилл» была БЕЗ порога и возвращала исходный дефект
+# через чёрный ход — естественный прирост (78->79, тот самый живой замер)
+# тоже «энергия выросла», значит тоже проходил бы как рефилл. Ревьюер
+# собрал сцену на фейках: холостая отправка (0 энергии), прирост +1,
+# склянка НЕ тратилась -> ARMED и NORMAL оба давали no_progress=0,
+# skip_targets=set(), лог врал про рефилл. ---
+
+def test_armed_engine_rejects_small_energy_rise_as_natural_regen_not_refill():
+    """Рост энергии МЕНЬШЕ порога рефилла (78->79, живой замер естественного
+    прироста между отправками) — НЕ рефилл, склянка не тратилась
+    (spend=0), отправка НЕ подтверждена."""
+    v = PreviewVision(["returning"], energy=79,
+                      leveled=[Target("mob", 5, 300, 700)])
+    t = ArmingThief()          # spend=0 — рефилла не было
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 78
+    target = Target("mob", 5, 540, 900)
+    eng._armed_target = target
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
+
+def test_thief_normal_path_rejects_small_energy_rise_as_natural_regen_not_refill():
+    """Тот же живой сценарий (78->79, без траты склянки) в обычном пути."""
+    target = Target("mob", 5, 540, 900)
+    v = ThiefFakeVision(leveled=[target, Target("mob", 5, 300, 700)],
+                        energy=78, energy_after=79)
+    t = FakeThief()             # spend=0 — рефилла не было
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 1
+    assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)

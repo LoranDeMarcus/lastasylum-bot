@@ -38,9 +38,26 @@ class BotEngine:
         self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
+        # Конвейер: превью следующего вора открыто и ждёт только отряда.
+        self._armed = False
+        self._armed_polls = 0
+        # Энергия ДО отправки (снята на зум-скулле в _arm_next) и цель,
+        # которую взвели — нужны для подтверждения отправки по энергии
+        # (см. _dispatch_confirmed): живой прогон 2026-08-13 поймал заход
+        # 79->79, отрапортованный игрой как 'dispatched', хотя энергия не
+        # потратилась ни на йоту.
+        self._armed_energy_before = None
+        self._armed_target = None
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
         self._no_progress = 0       # подряд итераций без отправки (в любом активном режиме)
         self._zoom_fails = 0        # подряд неудачных приведений зума
+        # неопознанный экран считаем ОТДЕЛЬНО от сломанного щипка: у них
+        # разные лечения (переждать против «позвать человека») и разный запас
+        self._zoom_unknowns = 0
+        # подряд попыток закрыть СВОЮ модалку тапом: закрытие либо срабатывает
+        # сразу, либо не сработает вовсе (тап мимо, игра зависла) — без
+        # предела бот крутится вечно, а сторож это не ловит (экран распознан)
+        self._modal_closes = 0
         self._searches = 0          # «Поисков» подряд без набора целей
         # ПОДТВЕРЖДЁННЫЕ вступления в чужие штурмы (режим join). Считает движок,
         # а не раннер: подтверждение видно только здесь, а «dispatched» от
@@ -100,6 +117,109 @@ class BotEngine:
     @staticmethod
     def _target_key(t):
         return (t.kind, round(t.x / 20), round(t.y / 20))
+
+    def _account_flasks(self, used_before):
+        """«В наличии: N» точнее локального учёта, но если оно не прочлось —
+        считаем потраченное локально и НЕ молчим об этом. Раньше эта ветка
+        только читала last_flask_stock: если «В наличии» не прочлось,
+        self.flasks оставался None, а refill = (self.flasks is None) разрешал
+        бы рефилл навсегда — порог склянок молча переставал действовать.
+
+        Один метод на оба пути отправки РЕЖИМА ВОРА (обычный и конвейерный):
+        двух копий этого учёта здесь уже быть не должно. У «Элитной скверны»
+        (_corruption_iteration) жива своя копия того же учёта — это
+        осознанно не тронуто этой правкой (разные режимы, рефакторить
+        скверну задача не просила), но врать, что копий нигде больше нет,
+        комментарий не должен.
+
+        Возвращает spent: раунд исправления 2 использует его же в
+        _dispatch_confirmed (рефилл ломает подтверждение по энергии) —
+        число уже посчитано здесь, второй копии вычисления не заводим."""
+        spent = self.thief.flasks_used - used_before
+        if self.thief.last_flask_stock is not None:
+            self.flasks = self.thief.last_flask_stock
+        elif spent and self.flasks is not None:
+            self.flasks = max(0, self.flasks - spent)
+        elif spent:
+            self.log("  остаток склянок прочитать не удалось — порог не действует")
+        if spent:
+            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+        return spent
+
+    def _refill_allowed(self):
+        return self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+
+    def _dispatch_confirmed(self, energy_before, flask_spent):
+        """Действительно ли отправка потратила энергию — а не просто закрыла
+        превью вхолостую. Живой прогон 2026-08-13 (раунд исправления 1,
+        задача 7): цепочка энергии 98->88->78->79->69->59->49 — между
+        второй и третьей отправкой энергия успела САМА отрасти на 1
+        (78->79), а сама третья отправка прошла как 79->79 и не потратила
+        ничего; движок при этом отрапортовал 'dispatched' и обнулил
+        счётчик провалов. Гипотеза «взвели того же вора, к которому уже
+        идёт отряд» (камера центрируется на нём) проверкой по координатам
+        НЕ подтвердилась — 240 px от центра у холостого случая против 194
+        и 464 px у успешных, — поэтому чинится сам факт ложного успеха, а
+        не предполагаемый механизм (он неизвестен).
+
+        Вор стоит 10 энергии (замер спеки), но она сама отрастает по ходу
+        цикла — порог не РОВНО 10, а НЕ МЕНЬШЕ 5 (cfg.thief_dispatch_energy_drop):
+        разделяет 0 и 10 с запасом и не путает естественный прирост с
+        подтверждением.
+
+        Раунд исправления 2 (Important, перепроверка): рефилл склянкой
+        (ThiefActions._low_energy) тратит +50/+100 энергии И сразу
+        отправляет — заход НАСТОЯЩИЙ, но энергия ПОСЛЕ него ВЫШЕ, чем ДО
+        (например 8 -> 58). Сравнение по разнице объявило бы такой заход
+        холостым: живая цель ушла бы в skip_targets, а _no_progress
+        раздулся бы вплоть до ложного стопа. Рефилл в режиме вора — штатное
+        событие (при flask_use_taps=2 срабатывает примерно раз в 5-10
+        отправок), не редкий край. flask_spent — потрачена ли склянка ЗА
+        ЭТОТ заход (spent из _account_flasks, посчитан вызывающим кодом на
+        том же used_before/thief.flasks_used, второй копии счёта не
+        заводим): если да, судить по энергии нельзя вовсе, считаем успешной
+        сразу — ЧЕСТНОЕ ОГРАНИЧЕНИЕ (осознанный размен, не недосмотр):
+        пока flask_spent коротко замыкает проверку, на заходах с рефиллом
+        подтверждения по энергии нет вовсе, и ложный 'dispatched' там
+        пройдёт молча — источник истины тут только сам факт траты склянки,
+        а не число на HUD.
+
+        Раунд исправления 3 (Important, перепроверка снова): «энергия
+        ВЫРОСЛА -> рефилл» БЕЗ порога возвращала исходный дефект через
+        чёрный ход — энергия отрастает сама (тот же замер: 78->79, +1 в
+        окне между отправками), и голое `energy_after > energy_before`
+        засчитывало естественный прирост как рефилл, а холостой заход
+        снова проходил бы как успех. cfg.thief_dispatch_energy_rise (20) —
+        порог именно РОСТА: не 1 (неотличимо от регенерации единицами) и
+        не 40 (минимум настоящего рефилла — склянка даёт +50/+100, минус
+        10 за отправку; порог впритык к минимуму рискует промахнуться на
+        шуме OCR/тайминга), а середина разрыва между ними.
+
+        Читать энергию можно не всегда (до — только на зум-скулле, после —
+        как только закрылось превью) -> любое из двух чтений может дать
+        None. Тогда сравнивать нечего: ложная тревога тут дороже пропуска,
+        считаем отправку успешной, как раньше, но не молчим об этом в
+        логе — тот же приём, что у нечитаемого остатка склянок в
+        _account_flasks."""
+        if flask_spent:
+            self.log("  за этот заход потрачена склянка — сравнение энергии "
+                     "неприменимо (рефилл), считаю отправку успешной")
+            return True
+        energy_after = self.vision.read_energy(self.driver.screenshot())
+        if energy_before is None or energy_after is None:
+            self.log("  энергию до/после отправки прочитать не удалось — "
+                     "подтвердить не могу, считаю успешной")
+            return True
+        if energy_after - energy_before >= self.cfg.thief_dispatch_energy_rise:
+            self.log(f"  энергия выросла после отправки ({energy_before} -> "
+                     f"{energy_after}) — похоже на рефилл, сравнение неприменимо, "
+                     f"считаю успешной")
+            return True
+        if energy_before - energy_after >= self.cfg.thief_dispatch_energy_drop:
+            return True
+        self.log(f"  отправка НЕ подтвердилась: энергия была {energy_before}, "
+                 f"стала {energy_after} — прогрессом не считаю")
+        return False
 
     def _corruption_iteration(self):
         """Режим «Элитная скверна»: гейт по числу активных отрядов «Отряд N/4»,
@@ -282,6 +402,11 @@ class BotEngine:
             if verdict == 'recovered':
                 return None
 
+        # Взведён: превью следующего вора уже открыто, ждём только отряд.
+        # Проверяем ДО гейтов зума — под модалкой зума не существует.
+        if self._armed:
+            return self._thief_armed_iteration()
+
         # 1. Гейт отряда — только на зум-ине, виджета на отзуме нет.
         gate = self._zoom_gate("close")
         if gate is not True:
@@ -304,6 +429,8 @@ class BotEngine:
         # приводится: тогда zoom_fail_limit не достигался бы НИКОГДА, и бот
         # вечно щипал бы туда-сюда молча вместо честной остановки.
         self._zoom_fails = 0
+        self._zoom_unknowns = 0
+        self._modal_closes = 0
         img = self.driver.screenshot()
         energy = self.vision.read_energy(img)
         targets = [t for t in self.vision.leveled_targets(img)
@@ -330,7 +457,7 @@ class BotEngine:
 
         # 4. Бьём ближайшего к центру: после «Поиска» камера стоит на воре.
         self._searches = 0
-        refill = self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
+        refill = self._refill_allowed()
         target = nearest(targets, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
         self.log(f"[целей={len(targets)}] энергия={energy} склянок={self.flasks}"
                  + (" (+рефилл разрешён)" if refill else "")
@@ -342,21 +469,7 @@ class BotEngine:
         used_before = self.thief.flasks_used
         res = self.thief.attack(target, refill=refill)
         self.log(f"  Удар по вору -> {res}")
-        # Тот же приём, что в _corruption_iteration: «В наличии: N» точнее
-        # локального учёта, но если оно не прочлось — считаем потраченное
-        # локально и НЕ молчим об этом. Раньше эта ветка только читала
-        # last_flask_stock: если «В наличии» не прочлось, self.flasks
-        # оставался None, а refill = self.flasks is None разрешал бы
-        # рефилл навсегда — порог склянок молча переставал действовать.
-        spent = self.thief.flasks_used - used_before
-        if self.thief.last_flask_stock is not None:
-            self.flasks = self.thief.last_flask_stock
-        elif spent and self.flasks is not None:
-            self.flasks = max(0, self.flasks - spent)
-        elif spent:
-            self.log("  остаток склянок прочитать не удалось — порог не действует")
-        if spent:
-            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+        spent = self._account_flasks(used_before)
         if res == 'stopped':
             self.log("  заход прерван по кнопке Стоп")
             return Action('stop')
@@ -371,8 +484,15 @@ class BotEngine:
         if res == 'missed':
             self.skip_targets.add(self._target_key(target))
 
+        # Тот же ложный успех возможен и здесь: `energy` — значение,
+        # прочитанное ДО удара чуть выше в этой же итерации. Один метод на
+        # оба пути отправки (обычный и конвейерный) — см. _dispatch_confirmed.
+        if res == 'dispatched' and not self._dispatch_confirmed(energy, spent > 0):
+            self.skip_targets.add(self._target_key(target))
+            res = 'unconfirmed'
         if res == 'dispatched':
             self._no_progress = 0
+            self._arm_next()
         else:
             self._no_progress += 1
             if self._no_progress >= self.cfg.max_search_failures:
@@ -410,19 +530,159 @@ class BotEngine:
             return Action('stop')
         return self._zoom_failed()
 
+    # Экраны, которые бот открывает сам и умеет закрыть тапом по затемнению.
+    # Имена — ровно те, что возвращает Vision.classify_screen.
+    _OWN_MODALS = ('thief_tab', 'thief_preview', 'energy_window',
+                   'preview', 'preview_low_energy', 'dialog', 'boss_panel',
+                   'join_list', 'join_preview')
+
     def _zoom_failed(self):
-        """Зум не привёлся. Копим неудачи ПОДРЯД, а не останавливаемся сразу:
-        разовая осечка бывает штатно (анимация не доехала, поверх кадра
-        всплыл баннер). Но и работать на чужом зуме нельзя — детекция
+        """Зум не привёлся. Что делать — зависит от ПРИЧИНЫ.
+
+        «Щипок не двигает карту» — поломка: копим неудачи подряд и зовём
+        человека, как раньше. Работать на чужом зуме нельзя: детекция
         площадей врёт, и бот тапал бы мимо целей.
 
+        «Экран не опознан» — чаще временная помеха. Живьём (прогон 3,
+        2026-08-13) всплывший баннер прогресса закрыл якорь HUD энергии
+        (скор 0.364 при пороге 0.7), и бот встал за ШЕСТЬ секунд с «нужен
+        человек», хотя баннер уходит сам. Такие ждём дольше и отдельным
+        счётчиком — той же политикой, что у сторожа: ждать без единого тапа.
+
+        Исключение — СВОЯ модалка (превью, окно энергии, меню режима):
+        ожиданием она не уйдёт, её закрывают. Это не провал зума, иначе три
+        всплывших окна подряд выключали бы бота.
+
+        У закрытия модалки СВОЙ предел (Critical, ревью раунда 1): без него
+        промахнувшийся тап или зависшая игра держат бота в вечном `None`, а
+        сторож это не ловит — экран распознан, просто это не карта. Предел
+        маленький: закрытие либо срабатывает сразу, либо не сработает вовсе,
+        это не помеха, которую пережидают.
+
         Возвращает None (ждём и пробуем снова) или Action('stop')."""
+        if getattr(self.zoom, 'last_failure', 'stuck') == 'unknown_screen':
+            screen = self.vision.classify_screen(self.driver.screenshot())
+            if screen in self._OWN_MODALS:
+                self._modal_closes += 1
+                if self._modal_closes >= self.cfg.modal_close_limit:
+                    self.log(f"«{screen}» не закрывается {self._modal_closes} раз "
+                             f"подряд — стоп, нужен человек.")
+                    return Action('stop')
+                self.log(f"  поверх карты открыт «{screen}» — закрываю и пробую снова")
+                self.actions.close_preview()
+                self.human.after_tap(0.6)
+                return None
+            self._zoom_unknowns += 1
+            if self._zoom_unknowns >= self.cfg.zoom_unknown_limit:
+                self.log(f"Экран не опознан {self._zoom_unknowns} раз подряд — "
+                         f"стоп, нужен человек.")
+                return Action('stop')
+            self.log(f"  экран не опознан ({self._zoom_unknowns}/"
+                     f"{self.cfg.zoom_unknown_limit}) — жду, помеха может уйти сама")
+            self.sleep(self.human.idle_s(self.cfg.zoom_unknown_wait_s))
+            return None
+
         self._zoom_fails += 1
         if self._zoom_fails >= self.cfg.zoom_fail_limit:
             self.log(f"Зум не приводится {self._zoom_fails} раз подряд — стоп, нужен человек.")
             return Action('stop')
         self.sleep(self.human.idle_s(2.0))
         return None
+
+    def _thief_armed_iteration(self):
+        """Взведён: превью следующего вора открыто и ждёт освобождения отряда.
+
+        Ради этого состояния конвейер и делается: подготовка (тап цели,
+        панель, «Атака», превью — замер 18 с) уходит ПОД марш, а не после
+        него. Гейт читается по карточке отряда в самом превью: верхний
+        виджет «Отряд» превью перекрывает."""
+        img = self.driver.screenshot()
+        # 'preview_low_energy' — ТОТ ЖЕ взведённый экран, просто игра
+        # подменила «Отправиться» на «Увеличить энергию» (нехватка энергии).
+        # Раньше здесь требовалось РОВНО 'thief_preview', и на этом варианте
+        # взвод снимался, теряя подготовленный такт (~18 с) при каждом
+        # рефилле (раз в 10 отправок, живой прогон 2026-08-13,
+        # reference/26_preview_low_energy.png). fire() ниже сам разберёт
+        # разницу: кнопки на кадре нет -> уйдёт в _low_energy(refill).
+        if self.vision.classify_screen(img) not in ('thief_preview', 'preview_low_energy'):
+            self.log("Превью закрылось само — снимаю взвод.")
+            self._armed = False
+            return Action('attack_mob')
+
+        state = self.vision.preview_squad_state(img, self.cfg.mob_squad)
+        # Тот же гейт, что и в обычном пути (см. _squad_ready): 'idle' ->
+        # готов, 'returning' -> по флагу send_next_on_return, 'busy' и
+        # None (карточку не опознали) -> занят. Раньше здесь стояла своя
+        # инлайн-проверка `state in (None, 'busy')`, которая слала по
+        # 'returning' БЕЗУСЛОВНО — флаг send_next_on_return в конвейере
+        # молча не действовал.
+        if not self._squad_ready(state):
+            self._armed_polls += 1
+            if self._armed_polls >= self.cfg.armed_poll_limit:
+                self.log("Отряд не освободился за отведённое время — закрываю превью.")
+                self.actions.close_preview()
+                self._armed = False
+                return None
+            self.sleep(self.human.idle_s(self.cfg.armed_poll_s))
+            return None
+
+        self.log(f"Отряд {self.cfg.mob_squad}: {state} -> отправляю из готового превью")
+        used_before = self.thief.flasks_used
+        res = self.thief.fire(refill=self._refill_allowed())
+        self._armed = False
+        self.log(f"  Отправка -> {res}")
+        spent = self._account_flasks(used_before)
+        if res == 'stopped':
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
+        if res == 'low_energy':
+            self.log("Энергии не хватает — стоп. Пополни энергию и запусти снова.")
+            return Action('stop')
+        # Игра может отрапортовать 'dispatched', ничего не потратив (живой
+        # прогон 2026-08-13: заход 79->79) — см. _dispatch_confirmed. Тот же
+        # приём, что у неподтверждённого вступления в _join_iteration:
+        # понижаем 'dispatched' до провала, дальше он идёт обычной веткой.
+        if res == 'dispatched' and not self._dispatch_confirmed(self._armed_energy_before, spent > 0):
+            self.skip_targets.add(self._target_key(self._armed_target))
+            res = 'unconfirmed'
+        if res == 'dispatched':
+            self._no_progress = 0
+            self._arm_next()
+        else:
+            self._no_progress += 1
+            if self._no_progress >= self.cfg.max_search_failures:
+                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+                return Action('stop')
+        return Action('attack_mob')
+
+    def _arm_next(self):
+        """Подготовить следующего вора, пока отряд в марше.
+
+        Тихо выходит, если цели нет или взвод не удался: это не провал
+        итерации, обычный цикл просто отработает как раньше."""
+        if not self.cfg.thief_pipeline or self.cfg.dry_run:
+            return
+        if not self.zoom.ensure("skull"):
+            return
+        img = self.driver.screenshot()
+        # Энергия ДО отправки — только здесь, на зум-скулле, HUD ещё виден:
+        # внутри превью read_energy() отдаёт None (HUD там перекрыт).
+        energy_before = self.vision.read_energy(img)
+        targets = [t for t in self.vision.leveled_targets(img)
+                   if t.level == self.cfg.thief_level
+                   and self._target_key(t) not in self.skip_targets]
+        if not targets:
+            return
+        target = nearest(targets, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
+        res = self.thief.arm(target)
+        self.log(f"  взвод следующего вора @({target.x},{target.y}) -> {res}")
+        if res == 'armed':
+            self._armed = True
+            self._armed_polls = 0
+            self._armed_energy_before = energy_before
+            self._armed_target = target
+        elif res in ('not_thief', 'missed'):
+            self.skip_targets.add(self._target_key(target))
 
     def _thief_search(self):
         """Заход «Поиск» и разбор его исхода."""

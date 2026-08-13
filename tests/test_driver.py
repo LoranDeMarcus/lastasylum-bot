@@ -229,3 +229,22 @@ def test_fast_screencap_can_be_switched_off():
     drv._adb = fake
     drv.screenshot()
     assert asked == [("exec-out", "screencap", "-p")]
+
+# --- щипок зума ---
+
+def test_pinch_takes_step_count_from_config():
+    """Число точек жеста — настройка, а не константа: замер 2026-08-13
+    показал, что время жеста линейно по числу событий (~52 мс на событие),
+    и 8 шагов вместо 16 срезают щипок с 6,0 до 3,3 с при том же улове."""
+    cfg = Config()
+    cfg.pinch_steps = 3
+    drv = AdbDriver(cfg)
+    sent = []
+    drv._sendevent = lambda events: sent.append(list(events))
+    drv.zoom_out()
+    # два жеста: сброс контактов и сам щипок
+    assert len(sent) == 2
+    release, gesture = sent
+    assert release == [(0, 2, 0), (0, 0, 0)]
+    # (steps + 1) кадров, в каждом 2 пальца x 3 события + общий SYN
+    assert len(gesture) == (3 + 1) * 7 + 2

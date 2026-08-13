@@ -152,29 +152,49 @@ class AdbDriver:
         self._adb("shell", "input", "swipe",
                   str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(dur_ms))
 
-    def _pinch(self, a0, a1, b0, b1, steps=16):
+    _INPUT_DEV = "/dev/input/event4"
+
+    def _sendevent(self, events):
+        """Пачка событий одной командой.
+
+        Команды идут в `adb shell` через stdin: длинная цепочка не влезает в
+        аргумент adb («bad service name length»)."""
+        script = "".join(f"sendevent {self._INPUT_DEV} {t} {c} {v}\n"
+                         for t, c, v in events)
+        self._ensure_server()      # команда идёт мимо _adb — демона поднимаем сами
+        subprocess.run([self.cfg.adb_path, "-s", self.cfg.adb_serial, "shell"],
+                       input=script.encode(), check=True)
+
+    def release_touch(self):
+        """«Все пальцы подняты»: пустой MT-репорт + SYN.
+
+        Замер 2026-08-13: залипший контакт убивает мультитач целиком —
+        переставал работать и производственный щипок (0 из 6), — и лечится
+        ровно этой посылкой. Стоит ~0,05 с, поэтому шлём перед КАЖДЫМ
+        жестом, а не по факту поломки: обнаружить залипание бот всё равно
+        может только по провалу зума, то есть уже потеряв время."""
+        self._sendevent([(0, 2, 0), (0, 0, 0)])
+
+    def _pinch(self, a0, a1, b0, b1, steps=None):
         """Щипок двумя пальцами: палец A ведём a0->a1, палец B — b0->b1.
 
         Устройство BlueStacks — MT protocol type A (ABS_MT_POSITION_X/Y
-        0..32767, пальцы разделяются SYN_MT_REPORT). Команды подаём в `adb
-        shell` через stdin: длинная цепочка не влезает в аргумент adb."""
-        dev = "/dev/input/event4"
+        0..32767, пальцы разделяются SYN_MT_REPORT)."""
+        steps = self.cfg.pinch_steps if steps is None else steps
+        self.release_touch()
         def ev(px, py):
-            return round(px * 32767 / self.cfg.screen_w), round(py * 32767 / self.cfg.screen_h)
-        lines = []
-        def se(t, c, v):
-            lines.append(f"sendevent {dev} {t} {c} {v}")
+            return (round(px * 32767 / self.cfg.screen_w),
+                    round(py * 32767 / self.cfg.screen_h))
+        events = []
         for i in range(steps + 1):
             f = i / steps
             for (p0, p1) in ((a0, a1), (b0, b1)):
-                ex, ey = ev(p0[0] + (p1[0] - p0[0]) * f, p0[1] + (p1[1] - p0[1]) * f)
-                se(3, 53, ex); se(3, 54, ey); se(0, 2, 0)   # X, Y, SYN_MT_REPORT
-            se(0, 0, 0)                                       # SYN_REPORT
-        se(0, 2, 0); se(0, 0, 0)                             # release
-        script = "\n".join(lines) + "\n"
-        self._ensure_server()          # команда идёт мимо _adb — демона поднимаем сами
-        subprocess.run([self.cfg.adb_path, "-s", self.cfg.adb_serial, "shell"],
-                       input=script.encode(), check=True)
+                ex, ey = ev(p0[0] + (p1[0] - p0[0]) * f,
+                            p0[1] + (p1[1] - p0[1]) * f)
+                events += [(3, 53, ex), (3, 54, ey), (0, 2, 0)]   # X, Y, SYN_MT_REPORT
+            events.append((0, 0, 0))                              # SYN_REPORT
+        events += [(0, 2, 0), (0, 0, 0)]                          # release
+        self._sendevent(events)
 
     # GENTLE (один «щелчок» зума): сильный щипок переотзумивает до «пин-зума»
     # (мобы = белые пины). Мягкое сведение даёт переход sprite -> череп.
