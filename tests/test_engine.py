@@ -1025,8 +1025,8 @@ def test_thief_prefers_read_stock_over_local_count():
 
 class ArmingThief(FakeThief):
     """Взвод и отправка раздельно — как в ThiefActions после задачи 6."""
-    def __init__(self, arm_result="armed", fire_result="dispatched"):
-        super().__init__()
+    def __init__(self, arm_result="armed", fire_result="dispatched", spend=0, stock=None):
+        super().__init__(spend=spend, stock=stock)
         self.arm_result = arm_result
         self.fire_result = fire_result
     def arm(self, target):
@@ -1034,6 +1034,14 @@ class ArmingThief(FakeThief):
         return self.arm_result
     def fire(self, refill=False):
         self.calls.append(("fire", refill))
+        # Раунд исправления 2: та же имитация рефилла, что у FakeThief.attack
+        # (self._spend/self._stock из базового __init__) — нужна, чтобы
+        # тесты могли изобразить настоящий рефилл склянкой в fire().
+        if refill:
+            self.flasks_used += self._spend
+            if self._stock is not None:
+                self.last_flask_stock = self._stock
+                self._stock -= self._spend
         return self.fire_result
 
 class PreviewVision(ThiefFakeVision):
@@ -1131,7 +1139,8 @@ def test_armed_engine_confirms_dispatch_by_energy_drop():
 def test_armed_engine_rejects_dispatch_without_energy_drop():
     """Энергия не изменилась (79->79, живой прогон 2026-08-13) -> НЕ
     прогресс: _no_progress растёт, цель уходит в skip_targets, чтобы
-    следующий взвод не взял её снова."""
+    следующий взвод не взял её снова. И конвейер не взводит следующую цель
+    вхолостую (раунд исправления 2, недостающая проверка)."""
     v = PreviewVision(["returning"], energy=79)
     t = ArmingThief()
     eng = _thief_engine(v, thief=t)
@@ -1142,6 +1151,7 @@ def test_armed_engine_rejects_dispatch_without_energy_drop():
     eng.one_iteration()
     assert eng._no_progress == 1
     assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
 
 def test_armed_engine_stops_after_repeated_unconfirmed_dispatches():
     """Три неподтверждённые отправки подряд — стоп и зов человека, тот же
@@ -1185,8 +1195,8 @@ def test_thief_normal_path_confirms_dispatch_by_energy_drop():
 
 def test_thief_normal_path_rejects_dispatch_without_energy_drop():
     """И тот же гейт в обычном пути: энергия не упала — НЕ прогресс, цель
-    уходит в skip_targets. Одна проверка на оба пути, как и требовалось
-    (см. _dispatch_confirmed)."""
+    уходит в skip_targets, конвейер не взводится вхолостую. Одна проверка
+    на оба пути, как и требовалось (см. _dispatch_confirmed)."""
     target = Target("mob", 5, 540, 900)
     v = ThiefFakeVision(leveled=[target], energy=79, energy_after=79)
     t = FakeThief()
@@ -1194,3 +1204,47 @@ def test_thief_normal_path_rejects_dispatch_without_energy_drop():
     eng.one_iteration()
     assert eng._no_progress == 1
     assert eng._target_key(target) in eng.skip_targets
+    assert not any(c[0] == "arm" for c in t.calls)
+
+# --- Раунд исправления 2 (Important, перепроверка): рефилл склянкой тратит
+# +50/+100 энергии и сразу отправляет — заход НАСТОЯЩИЙ, но энергия ПОСЛЕ
+# него ВЫШЕ, чем до, и голое сравнение чисел объявило бы его холостым. ---
+
+def test_armed_engine_treats_flask_refill_as_confirmed_despite_energy_rise():
+    """Рефилл (склянка потрачена ЗА ЭТОТ заход, flasks_used вырос) — судить
+    по энергии нельзя вовсе: реальный живой случай, где энергия ВЫРОСЛА
+    (8 -> 58) после честной отправки."""
+    v = PreviewVision(["returning"], energy=58)
+    t = ArmingThief(spend=2)          # fire(refill=True) «тратит» склянку
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 8
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert eng.skip_targets == set()
+
+def test_armed_engine_treats_energy_rise_as_confirmed_even_without_tracked_spend():
+    """Симметричный случай (независимый от учёта склянок): энергия ВЫРОСЛА
+    сама по себе (8 -> 58) — тоже верный признак рефилла, даже если по
+    какой-то причине flasks_used его не отразил (spend=0 по умолчанию)."""
+    v = PreviewVision(["returning"], energy=58)
+    t = ArmingThief()                 # spend=0 — flasks_used НЕ растёт
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng._armed_energy_before = 8
+    eng._armed_target = Target("mob", 5, 540, 900)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert eng.skip_targets == set()
+
+def test_thief_normal_path_treats_flask_refill_as_confirmed_despite_energy_rise():
+    """И в обычном пути: рефилл (spend>0) — не повод объявлять отправку
+    холостой, даже если энергия выросла."""
+    target = Target("mob", 5, 540, 900)
+    v = ThiefFakeVision(leveled=[target], energy=8, energy_after=58)
+    t = FakeThief(spend=2)
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert eng._no_progress == 0
+    assert eng.skip_targets == set()

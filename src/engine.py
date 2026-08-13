@@ -126,7 +126,11 @@ class BotEngine:
         бы рефилл навсегда — порог склянок молча переставал действовать.
 
         Один метод на оба пути отправки (обычный и конвейерный): двух копий
-        этого учёта в проекте уже быть не должно."""
+        этого учёта в проекте уже быть не должно.
+
+        Возвращает spent: раунд исправления 2 использует его же в
+        _dispatch_confirmed (рефилл ломает подтверждение по энергии) —
+        число уже посчитано здесь, второй копии вычисления не заводим."""
         spent = self.thief.flasks_used - used_before
         if self.thief.last_flask_stock is not None:
             self.flasks = self.thief.last_flask_stock
@@ -136,11 +140,12 @@ class BotEngine:
             self.log("  остаток склянок прочитать не удалось — порог не действует")
         if spent:
             self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+        return spent
 
     def _refill_allowed(self):
         return self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
 
-    def _dispatch_confirmed(self, energy_before):
+    def _dispatch_confirmed(self, energy_before, flask_spent):
         """Действительно ли отправка потратила энергию — а не просто закрыла
         превью вхолостую. Живой прогон 2026-08-13 (раунд исправления 1,
         задача 7): цепочка энергии 98->88->78->79->69->59->49 — между
@@ -158,16 +163,41 @@ class BotEngine:
         разделяет 0 и 10 с запасом и не путает естественный прирост с
         подтверждением.
 
+        Раунд исправления 2 (Important, перепроверка): рефилл склянкой
+        (ThiefActions._low_energy) тратит +50/+100 энергии И сразу
+        отправляет — заход НАСТОЯЩИЙ, но энергия ПОСЛЕ него ВЫШЕ, чем ДО
+        (например 8 -> 58). Сравнение по разнице объявило бы такой заход
+        холостым: живая цель ушла бы в skip_targets, а _no_progress
+        раздулся бы вплоть до ложного стопа. Рефилл в режиме вора — штатное
+        событие (при flask_use_taps=2 срабатывает примерно раз в 5-10
+        отправок), не редкий край. flask_spent — потрачена ли склянка ЗА
+        ЭТОТ заход (spent из _account_flasks, посчитан вызывающим кодом на
+        том же used_before/thief.flasks_used, второй копии счёта не
+        заводим): если да, судить по энергии нельзя вовсе, считаем успешной
+        сразу. Симметрично: если энергия ВЫРОСЛА (energy_after >
+        energy_before), это тоже верный признак рефилла — независимый
+        второй сигнал на случай, если факт траты почему-то не отразился в
+        flasks_used.
+
         Читать энергию можно не всегда (до — только на зум-скулле, после —
         как только закрылось превью) -> любое из двух чтений может дать
         None. Тогда сравнивать нечего: ложная тревога тут дороже пропуска,
         считаем отправку успешной, как раньше, но не молчим об этом в
         логе — тот же приём, что у нечитаемого остатка склянок в
         _account_flasks."""
+        if flask_spent:
+            self.log("  за этот заход потрачена склянка — сравнение энергии "
+                     "неприменимо (рефилл), считаю отправку успешной")
+            return True
         energy_after = self.vision.read_energy(self.driver.screenshot())
         if energy_before is None or energy_after is None:
             self.log("  энергию до/после отправки прочитать не удалось — "
                      "подтвердить не могу, считаю успешной")
+            return True
+        if energy_after > energy_before:
+            self.log(f"  энергия выросла после отправки ({energy_before} -> "
+                     f"{energy_after}) — похоже на рефилл, сравнение неприменимо, "
+                     f"считаю успешной")
             return True
         if energy_before - energy_after >= self.cfg.thief_dispatch_energy_drop:
             return True
@@ -423,7 +453,7 @@ class BotEngine:
         used_before = self.thief.flasks_used
         res = self.thief.attack(target, refill=refill)
         self.log(f"  Удар по вору -> {res}")
-        self._account_flasks(used_before)
+        spent = self._account_flasks(used_before)
         if res == 'stopped':
             self.log("  заход прерван по кнопке Стоп")
             return Action('stop')
@@ -441,7 +471,7 @@ class BotEngine:
         # Тот же ложный успех возможен и здесь: `energy` — значение,
         # прочитанное ДО удара чуть выше в этой же итерации. Один метод на
         # оба пути отправки (обычный и конвейерный) — см. _dispatch_confirmed.
-        if res == 'dispatched' and not self._dispatch_confirmed(energy):
+        if res == 'dispatched' and not self._dispatch_confirmed(energy, spent > 0):
             self.skip_targets.add(self._target_key(target))
             res = 'unconfirmed'
         if res == 'dispatched':
@@ -574,7 +604,7 @@ class BotEngine:
         res = self.thief.fire(refill=self._refill_allowed())
         self._armed = False
         self.log(f"  Отправка -> {res}")
-        self._account_flasks(used_before)
+        spent = self._account_flasks(used_before)
         if res == 'stopped':
             self.log("  заход прерван по кнопке Стоп")
             return Action('stop')
@@ -585,7 +615,7 @@ class BotEngine:
         # прогон 2026-08-13: заход 79->79) — см. _dispatch_confirmed. Тот же
         # приём, что у неподтверждённого вступления в _join_iteration:
         # понижаем 'dispatched' до провала, дальше он идёт обычной веткой.
-        if res == 'dispatched' and not self._dispatch_confirmed(self._armed_energy_before):
+        if res == 'dispatched' and not self._dispatch_confirmed(self._armed_energy_before, spent > 0):
             self.skip_targets.add(self._target_key(self._armed_target))
             res = 'unconfirmed'
         if res == 'dispatched':
