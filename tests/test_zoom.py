@@ -82,6 +82,31 @@ def test_stop_before_pinch_blocks_action():
     assert keeper.ensure("skull") is False
     assert d.pinches == []
 
+class FakeHuman:
+    """Спай вместо настоящего Human: реальный after_tap растягивает базовую
+    паузу случайным множителем (delay_settle_mult) и добавляет реакцию
+    (delay_react >= 0.25 с) — точное значение cfg.pinch_settle_s в
+    засечённой паузе никогда не увидеть, минимум для 2.0 с уже 2.25 с.
+    Поэтому проверяем, ЧТО ZoomKeeper передаёт в after_tap, а не как
+    Human это потом растянет — это уже забота теста самого Human."""
+    def __init__(self):
+        self.after_tap_calls = []
+
+    def after_tap(self, base_s):
+        self.after_tap_calls.append(base_s)
+
+def test_settle_pause_comes_from_config():
+    """Пауза после жеста — настройка: с 8 шагами жест короче, и карта
+    доезжает анимацией уже ПОСЛЕ возврата управления."""
+    cfg = _cfg()
+    cfg.pinch_settle_s = 2.0
+    human = FakeHuman()
+    d = FakeDriver("close")
+    k = ZoomKeeper(d, FakeVision(), cfg, log=lambda m: None, sleep=lambda s: None,
+                   human=human)
+    assert k.ensure("skull") is True
+    assert 2.0 in human.after_tap_calls
+
 def test_gives_up_after_fail_limit():
     """Щипок не двигает карту -> не долбимся вечно.
 

@@ -51,7 +51,7 @@ class ZoomKeeper:
                 self.driver.zoom_out()
             else:
                 self.driver.zoom_in()
-            self.human.after_tap(1.3)      # карте нужно доехать анимацией
+            self.human.after_tap(self.cfg.pinch_settle_s)   # карте нужно доехать анимацией
         self.log(f"  зум: не удалось привести к '{want}' за "
                  f"{self.cfg.zoom_fail_limit} щипков")
         return False
