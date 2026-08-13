@@ -30,6 +30,9 @@ class ThiefActions:
         # как `if self.cancel.stopped()`, без проверок на None в каждой
         self.cancel = cancel if cancel is not None else Cancel()
         self.last_wave_seconds = None
+        # заполняется в arm() перед возвратом "armed", читается ТОЛЬКО
+        # attack() сразу же в этом кадре стека — см. комментарии в arm()/fire()
+        self._armed_img = None
         self.energy = EnergyRefill(driver, vision, cfg, log=log, sleep=sleep,
                                    human=self.human, cancel=self.cancel)
 
@@ -161,14 +164,15 @@ class ThiefActions:
         self.human.after_tap(1.6)
         return self.vision.find_button(self.driver.screenshot(), "attack")
 
-    def attack(self, target, refill=False):
-        """Один удар по цели: панель -> подтверждение вора -> «Атака» ->
-        отряд 2 -> «Отправиться».
+    def arm(self, target):
+        """Первая половина удара: открыть панель, подтвердить вора, нажать
+        «Атака» и оставить превью открытым. Энергию НЕ тратит.
 
-        refill — разрешено ли потратить фиолетовую склянку +50, если игра
-        сказала, что энергии не хватает (решение принимает движок по порогу).
+        Отдельно от отправки, потому что подготовка (замер 2026-08-13: 18 с)
+        может идти ПОКА отряд в марше, а отправка — только когда он
+        освободился.
 
-        'dispatched' | 'not_thief' | 'missed' | 'failed' | 'low_energy' | 'stopped'."""
+        'armed' | 'not_thief' | 'missed' | 'failed' | 'stopped'."""
         if self.cancel.stopped():
             return "stopped"
         pos = self._open_panel(target)
@@ -190,14 +194,46 @@ class ThiefActions:
         self.driver.tap(pos)
         self.human.after_tap(2.0)
 
+        # Превью обязано появиться: без него не по чему отличить «открылось»
+        # от «тап не прошёл». «Увеличить энергию» — тоже превью, просто с
+        # подменённой кнопкой (игра так делает при нехватке энергии).
         img = self.driver.screenshot()
+        if (self.vision.find_button(img, "dispatch") is None
+                and self.vision.find_button(img, "boost_energy") is None):
+            # между тапом «Атака» и этим кадром была настоящая пауза (2 с) —
+            # окно, где человек мог успеть нажать Стоп
+            return "stopped" if self.cancel.stopped() else self._abort("превью отправки не открылось")
+        # Кадр, которым только что подтвердили открытие превью, запоминаем
+        # для attack(): между этим кадром и решением fire() внутри ОДНОГО
+        # синхронного вызова не проходит времени, экран заведомо тот же —
+        # старый цельный attack() и принимал решение по этому же кадру, без
+        # второго скриншота. В конвейере (BotEngine вызывает fire() отдельно,
+        # когда отряд освободился после марша) этот кадр не передаётся —
+        # пройдёт реальное время, и fire() обязан смотреть заново (докстринг).
+        self._armed_img = img
+        return "armed"
+
+    def fire(self, refill=False, _img=None):
+        """Вторая половина: отправка из УЖЕ открытого превью.
+
+        refill — разрешено ли потратить фиолетовую склянку +50, если игра
+        сказала, что энергии не хватает (решение принимает движок по порогу).
+
+        _img — приватный параметр только для attack(): готовый кадр из
+        arm(), чтобы не дублировать скриншот, снятый мгновение назад в том
+        же вызове (см. комментарий в конце arm()). Извне (движок конвейера,
+        тесты) не передаётся — тогда экран снимается заново, как и требует
+        контракт метода: между отдельным arm() и отдельным fire() реально
+        прошёл марш, старый кадр мог устареть.
+
+        'dispatched' | 'failed' | 'low_energy' | 'stopped'."""
+        if self.cancel.stopped():
+            return "stopped"
+        img = _img if _img is not None else self.driver.screenshot()
         send = self.vision.find_button(img, "dispatch")
         if send is None:
             if self.vision.find_button(img, "boost_energy") is not None:
                 return self._low_energy(refill)
-            # между тапом «Атака» и этим кадром была настоящая пауза (2 с) —
-            # окно, где человек мог успеть нажать Стоп; не спутать с реальным
-            # провалом открытия превью (см. предупреждение задачи о таком баге)
             return "stopped" if self.cancel.stopped() else self._abort("превью отправки не открылось")
 
         # Гейт «Лёгкая победа» выключен намеренно: замер показал, что игра
@@ -205,6 +241,13 @@ class ThiefActions:
         # достигли предела», и гейт пропустил бы заведомо проходимого вора
         # (мощь 13M против 670K).
         return self._dispatch(send)
+
+    def attack(self, target, refill=False):
+        """Один удар по цели целиком: взвод + отправка.
+
+        'dispatched' | 'not_thief' | 'missed' | 'failed' | 'low_energy' | 'stopped'."""
+        res = self.arm(target)
+        return res if res != "armed" else self.fire(refill=refill, _img=self._armed_img)
 
     def _low_energy(self, refill):
         """Энергии меньше стоимости: игра подменила «Отправиться» на

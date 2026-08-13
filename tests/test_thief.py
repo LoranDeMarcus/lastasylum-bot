@@ -258,6 +258,39 @@ def test_attack_reports_low_energy_when_refill_not_allowed():
     assert (425, 1630) not in d.taps       # отряд не выбран
     assert (536, 1358) not in d.taps       # «Отправиться» не нажата
 
+def test_arm_opens_preview_without_dispatching():
+    """Взвод готовит превью и НЕ тратит энергию: отправка будет позже,
+    когда отряд освободится. Это и есть весь смысл конвейера — подготовка
+    (замер 18 с) уходит под марш."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1296, 200, 90),
+        ("preview", "dispatch"): Box(536, 1358, 372, 132),
+    })
+    t, d = _thief(["panel", "panel", "preview"], v)
+    assert t.arm(Target("mob", 5, 540, 936)) == "armed"
+    # тап по цели и тап «Атака» — но НЕ по «Отправиться»
+    assert (536, 1358) not in d.taps
+
+def test_fire_dispatches_from_an_open_preview():
+    """Вторая половина: превью уже открыто, осталось выбрать отряд и слать."""
+    v = FakeVision(buttons_by_frame={
+        ("preview", "dispatch"): Box(536, 1358, 372, 132),
+    })
+    t, d = _thief(["preview", "preview"], v)
+    assert t.fire() == "dispatched"
+    assert (536, 1358) in d.taps
+    assert Config().squad_slots[2] in d.taps      # отряд выбран ЯВНО
+
+def test_attack_is_arm_plus_fire():
+    """Старая точка входа обязана вести себя как раньше."""
+    v = FakeVision(buttons_by_frame={
+        ("panel", "attack"): Box(537, 1296, 200, 90),
+        ("preview", "dispatch"): Box(536, 1358, 372, 132),
+    })
+    t, d = _thief(["panel", "panel", "preview", "preview"], v)
+    assert t.attack(Target("mob", 5, 540, 936)) == "dispatched"
+    assert (536, 1358) in d.taps
+
 # --- attack()/_low_energy(): отмена проверяется ПЕРЕД каждым тапом -------
 # По образцу cancel-тестов для search() выше: у каждой точки проверки
 # cancel.stopped() в attack()/_low_energy()/_dispatch() должен быть тест,
