@@ -38,6 +38,9 @@ class BotEngine:
         self.watchdog = watchdog       # сторож экрана; None -> движок работает как раньше
         self.flasks = None
         self.skip_targets = set()   # непроходимые боссы / фантомы (по позиции) — не выбираем
+        # Конвейер: превью следующего вора открыто и ждёт только отряда.
+        self._armed = False
+        self._armed_polls = 0
         self._offmap_pinches = 0    # подряд попыток авто-отзума когда не на карте
         self._no_progress = 0       # подряд итераций без отправки (в любом активном режиме)
         self._zoom_fails = 0        # подряд неудачных приведений зума
@@ -107,6 +110,28 @@ class BotEngine:
     @staticmethod
     def _target_key(t):
         return (t.kind, round(t.x / 20), round(t.y / 20))
+
+    def _account_flasks(self, used_before):
+        """«В наличии: N» точнее локального учёта, но если оно не прочлось —
+        считаем потраченное локально и НЕ молчим об этом. Раньше эта ветка
+        только читала last_flask_stock: если «В наличии» не прочлось,
+        self.flasks оставался None, а refill = (self.flasks is None) разрешал
+        бы рефилл навсегда — порог склянок молча переставал действовать.
+
+        Один метод на оба пути отправки (обычный и конвейерный): двух копий
+        этого учёта в проекте уже быть не должно."""
+        spent = self.thief.flasks_used - used_before
+        if self.thief.last_flask_stock is not None:
+            self.flasks = self.thief.last_flask_stock
+        elif spent and self.flasks is not None:
+            self.flasks = max(0, self.flasks - spent)
+        elif spent:
+            self.log("  остаток склянок прочитать не удалось — порог не действует")
+        if spent:
+            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+
+    def _refill_allowed(self):
+        return self.flasks is None or self.flasks > self.cfg.flask_stop_threshold
 
     def _corruption_iteration(self):
         """Режим «Элитная скверна»: гейт по числу активных отрядов «Отряд N/4»,
@@ -289,6 +314,11 @@ class BotEngine:
             if verdict == 'recovered':
                 return None
 
+        # Взведён: превью следующего вора уже открыто, ждём только отряд.
+        # Проверяем ДО гейтов зума — под модалкой зума не существует.
+        if self._armed:
+            return self._thief_armed_iteration()
+
         # 1. Гейт отряда — только на зум-ине, виджета на отзуме нет.
         gate = self._zoom_gate("close")
         if gate is not True:
@@ -351,21 +381,7 @@ class BotEngine:
         used_before = self.thief.flasks_used
         res = self.thief.attack(target, refill=refill)
         self.log(f"  Удар по вору -> {res}")
-        # Тот же приём, что в _corruption_iteration: «В наличии: N» точнее
-        # локального учёта, но если оно не прочлось — считаем потраченное
-        # локально и НЕ молчим об этом. Раньше эта ветка только читала
-        # last_flask_stock: если «В наличии» не прочлось, self.flasks
-        # оставался None, а refill = self.flasks is None разрешал бы
-        # рефилл навсегда — порог склянок молча переставал действовать.
-        spent = self.thief.flasks_used - used_before
-        if self.thief.last_flask_stock is not None:
-            self.flasks = self.thief.last_flask_stock
-        elif spent and self.flasks is not None:
-            self.flasks = max(0, self.flasks - spent)
-        elif spent:
-            self.log("  остаток склянок прочитать не удалось — порог не действует")
-        if spent:
-            self.log(f"  склянок потрачено {spent}, осталось {self.flasks}")
+        self._account_flasks(used_before)
         if res == 'stopped':
             self.log("  заход прерван по кнопке Стоп")
             return Action('stop')
@@ -382,6 +398,7 @@ class BotEngine:
 
         if res == 'dispatched':
             self._no_progress = 0
+            self._arm_next()
         else:
             self._no_progress += 1
             if self._no_progress >= self.cfg.max_search_failures:
@@ -477,6 +494,78 @@ class BotEngine:
             return Action('stop')
         self.sleep(self.human.idle_s(2.0))
         return None
+
+    def _thief_armed_iteration(self):
+        """Взведён: превью следующего вора открыто и ждёт освобождения отряда.
+
+        Ради этого состояния конвейер и делается: подготовка (тап цели,
+        панель, «Атака», превью — замер 18 с) уходит ПОД марш, а не после
+        него. Гейт читается по карточке отряда в самом превью: верхний
+        виджет «Отряд» превью перекрывает."""
+        img = self.driver.screenshot()
+        if self.vision.classify_screen(img) != 'thief_preview':
+            self.log("Превью закрылось само — снимаю взвод.")
+            self._armed = False
+            return Action('attack_mob')
+
+        state = self.vision.preview_squad_state(img, self.cfg.mob_squad)
+        # None = карточку не опознали. Трактуем как «занят»: лишнее ожидание
+        # дешевле отправки вслепую.
+        if state in (None, 'busy'):
+            self._armed_polls += 1
+            if self._armed_polls >= self.cfg.armed_poll_limit:
+                self.log("Отряд не освободился за отведённое время — закрываю превью.")
+                self.actions.close_preview()
+                self._armed = False
+                return None
+            self.sleep(self.human.idle_s(self.cfg.armed_poll_s))
+            return None
+
+        self.log(f"Отряд {self.cfg.mob_squad}: {state} -> отправляю из готового превью")
+        used_before = self.thief.flasks_used
+        res = self.thief.fire(refill=self._refill_allowed())
+        self._armed = False
+        self.log(f"  Отправка -> {res}")
+        self._account_flasks(used_before)
+        if res == 'stopped':
+            self.log("  заход прерван по кнопке Стоп")
+            return Action('stop')
+        if res == 'low_energy':
+            self.log("Энергии не хватает — стоп. Пополни энергию и запусти снова.")
+            return Action('stop')
+        if res == 'dispatched':
+            self._no_progress = 0
+            self._arm_next()
+        else:
+            self._no_progress += 1
+            if self._no_progress >= self.cfg.max_search_failures:
+                self.log(f"Нет отправок {self._no_progress} раз подряд — стоп, нужен человек.")
+                return Action('stop')
+        return Action('attack_mob')
+
+    def _arm_next(self):
+        """Подготовить следующего вора, пока отряд в марше.
+
+        Тихо выходит, если цели нет или взвод не удался: это не провал
+        итерации, обычный цикл просто отработает как раньше."""
+        if not self.cfg.thief_pipeline or self.cfg.dry_run:
+            return
+        if not self.zoom.ensure("skull"):
+            return
+        img = self.driver.screenshot()
+        targets = [t for t in self.vision.leveled_targets(img)
+                   if t.level == self.cfg.thief_level
+                   and self._target_key(t) not in self.skip_targets]
+        if not targets:
+            return
+        target = nearest(targets, self.cfg.screen_w // 2, self.cfg.screen_h // 2)
+        res = self.thief.arm(target)
+        self.log(f"  взвод следующего вора @({target.x},{target.y}) -> {res}")
+        if res == 'armed':
+            self._armed = True
+            self._armed_polls = 0
+        elif res in ('not_thief', 'missed'):
+            self.skip_targets.add(self._target_key(target))
 
     def _thief_search(self):
         """Заход «Поиск» и разбор его исхода."""

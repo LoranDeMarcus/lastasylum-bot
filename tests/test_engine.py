@@ -593,6 +593,20 @@ class FakeThief:
                 self.last_flask_stock = self._stock
                 self._stock -= self._spend
         return self.attack_result
+    # Конвейер зовёт arm() после КАЖДОЙ обычной отправки (не только из
+    # взведённого состояния) — _arm_next() в движке. Тесты этого файла,
+    # писавшиеся до задачи 7, про конвейер ничего не знают и заведомо не
+    # взводят свой FakeThief; 'failed' держит _arm_next() тихим (ветка
+    # «взвод не удался» в движке), чтобы _armed не включался у них исподтишка
+    # и старые проверки остались верны без единой правки. Тесты САМОГО
+    # конвейера используют ArmingThief (см. ниже), который эти методы
+    # переопределяет целиком.
+    def arm(self, target):
+        self.calls.append(("arm", target.x, target.y))
+        return "failed"
+    def fire(self, refill=False):
+        self.calls.append(("fire", refill))
+        return "failed"
 
 class FakeZoom:
     def __init__(self, ok=True, last_failure='stuck'):
@@ -996,3 +1010,86 @@ def test_thief_prefers_read_stock_over_local_count():
     eng = _thief_engine(v, thief=t)          # локальный учёт (500) был бы неверен
     eng.one_iteration()
     assert eng.flasks == 273
+
+# --- Конвейер: готовим следующего вора, пока отряд в марше ---
+
+class ArmingThief(FakeThief):
+    """Взвод и отправка раздельно — как в ThiefActions после задачи 6."""
+    def __init__(self, arm_result="armed", fire_result="dispatched"):
+        super().__init__()
+        self.arm_result = arm_result
+        self.fire_result = fire_result
+    def arm(self, target):
+        self.calls.append(("arm", target.x, target.y))
+        return self.arm_result
+    def fire(self, refill=False):
+        self.calls.append(("fire", refill))
+        return self.fire_result
+
+class PreviewVision(ThiefFakeVision):
+    """В превью карточка отряда 2 отдаёт заранее заданную череду состояний."""
+    def __init__(self, states, screen="thief_preview", **kw):
+        super().__init__(**kw)
+        self._states = list(states)
+        self._screen = screen
+    def classify_screen(self, img):
+        return self._screen
+    def preview_squad_state(self, img, slot):
+        return self._states.pop(0) if self._states else "idle"
+
+def test_after_dispatch_engine_arms_the_next_thief():
+    """Смысл конвейера: подготовка следующей цели уходит ПОД марш."""
+    v = ThiefFakeVision(leveled=[Target("mob", 5, 540, 900),
+                                 Target("mob", 5, 300, 700)])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng.one_iteration()
+    assert any(c[0] == "arm" for c in t.calls)
+    assert eng._armed is True
+
+def test_armed_engine_waits_while_squad_is_busy():
+    """Пока на карточке мечи — «Отправиться» не жмём: живьём такой тап
+    ничего не отправляет, только закрывает превью (замер 2026-08-13)."""
+    v = PreviewVision(["busy"])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    assert eng.one_iteration() is None
+    assert not any(c[0] == "fire" for c in t.calls)
+
+def test_armed_engine_fires_on_returning():
+    """Жёлтая стрелка возврата — сигнал к отправке (решение пользователя):
+    отряд перенаправляется, не доходя до базы."""
+    v = PreviewVision(["returning"])
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng.one_iteration()
+    assert ("fire", True) in t.calls
+    assert eng._armed is False
+
+def test_armed_engine_gives_up_after_poll_limit():
+    """Вора могли увести. Вечно сидеть в превью нельзя — закрываем и
+    возвращаемся в обычный цикл."""
+    v = PreviewVision(["busy"] * 5)
+    t = ArmingThief()
+    acts = ClosingActions(v)
+    eng = BotEngine(ThiefFakeDriver(), v, acts,
+                    _thief_cfg(armed_poll_limit=2), log=lambda m: None,
+                    sleep=lambda s: None, thief=t, zoom=FakeZoom())
+    eng.flasks = 500
+    eng._armed = True
+    eng.one_iteration()
+    eng.one_iteration()
+    assert eng._armed is False
+    assert acts.closed == 1
+
+def test_armed_engine_drops_the_arm_if_preview_vanished():
+    """Превью закрылось само — это не поломка, просто взвод снят."""
+    v = PreviewVision(["idle"], screen="world_map")
+    t = ArmingThief()
+    eng = _thief_engine(v, thief=t)
+    eng._armed = True
+    eng.one_iteration()
+    assert eng._armed is False
+    assert not any(c[0] == "fire" for c in t.calls)
